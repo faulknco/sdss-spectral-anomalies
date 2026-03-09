@@ -68,6 +68,8 @@ class ConditionalSpectralAutoencoder(nn.Module):
         x = self.decoder_fc(torch.cat([z, meta_emb], dim=1))
         x = x.view(x.size(0), 128, self._conv_out_dim)
         x = self.conv_decoder(x)
+        # _conv_out_dim is an upper-bound approximation; trim/pad corrects any off-by-one
+        # from stride-2 transposed convolutions rounding differently per input_dim.
         if x.size(2) > self.input_dim:
             x = x[:, :, : self.input_dim]
         elif x.size(2) < self.input_dim:
@@ -79,11 +81,15 @@ class ConditionalSpectralAutoencoder(nn.Module):
 
     @torch.no_grad()
     def reconstruction_error(self, spectra: np.ndarray, metadata: np.ndarray) -> np.ndarray:
-        self.train(False)
+        was_training = self.training
+        self.eval()
         x = torch.tensor(spectra, dtype=torch.float32).unsqueeze(1)
         meta = torch.tensor(metadata, dtype=torch.float32)
         recon = self.forward(x, meta)
-        return ((x - recon) ** 2).mean(dim=(1, 2)).numpy()
+        errors = ((x - recon) ** 2).mean(dim=(1, 2)).numpy()
+        if was_training:
+            self.train()
+        return errors
 
 
 def train_conditional_autoencoder(
