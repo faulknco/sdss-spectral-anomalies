@@ -35,6 +35,10 @@ class SpectralAutoencoder(nn.Module):
             nn.ConvTranspose1d(32, 1, kernel_size=7, stride=2, padding=3, output_padding=1),
         )
 
+    def param_count(self) -> int:
+        """Return total number of trainable parameters."""
+        return sum(p.numel() for p in self.parameters())
+
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         return self.encoder(x)
 

@@ -37,6 +37,14 @@ class ClassicalAnomalyDetector:
         components = self.transform(spectra)
         return -self.iforest.decision_function(components)
 
+    def param_count(self) -> int:
+        """Return approximate total parameter count for PCA + Isolation Forest."""
+        pca_params = self.pca.components_.size + self.pca.mean_.size
+        n_estimators = self.iforest.n_estimators
+        n_features = self.pca.n_components
+        forest_params = n_estimators * n_features * 10
+        return pca_params + forest_params
+
     def reconstruction_error(self, spectra: np.ndarray) -> np.ndarray:
         """Compute PCA reconstruction error per spectrum."""
         scaled = self.scaler.transform(spectra)
