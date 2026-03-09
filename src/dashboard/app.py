@@ -1,5 +1,7 @@
 # src/dashboard/app.py
 """Streamlit dashboard for exploring spectral anomalies."""
+import json
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -20,8 +22,21 @@ def load_data():
     pca_components = np.load(RESULTS_DIR / "pca_components.npy")
     if_scores = np.load(RESULTS_DIR / "if_scores.npy")
     ae_scores = np.load(RESULTS_DIR / "ae_scores.npy")
+    ocsvm_scores = np.load(RESULTS_DIR / "ocsvm_scores.npy")
+    dagmm_scores = np.load(RESULTS_DIR / "dagmm_scores.npy")
+    if_stability_std = np.load(RESULTS_DIR / "if_stability_std.npy")
+    categories = list(np.load(RESULTS_DIR / "categories.npy"))
     wavelength_grid = np.linspace(3800, 9200, spectra.shape[1])
-    return spectra, metadata, comparison, pca_components, if_scores, ae_scores, wavelength_grid
+
+    param_counts = {}
+    param_path = RESULTS_DIR / "param_counts.json"
+    if param_path.exists():
+        with open(param_path) as f:
+            param_counts = json.load(f)
+
+    return (spectra, metadata, comparison, pca_components,
+            if_scores, ae_scores, ocsvm_scores, dagmm_scores,
+            if_stability_std, categories, param_counts, wavelength_grid)
 
 
 def plot_spectrum(spectra, wavelength_grid, idx, title="Spectrum"):
@@ -43,27 +58,41 @@ def main():
     st.set_page_config(page_title="SDSS Spectral Anomalies", layout="wide")
     st.title("SDSS Spectral Anomaly Explorer")
 
-    spectra, metadata, comparison, pca_components, if_scores, ae_scores, wl = load_data()
+    (spectra, metadata, comparison, pca_components,
+     if_scores, ae_scores, ocsvm_scores, dagmm_scores,
+     if_stability_std, categories, param_counts, wl) = load_data()
 
-    tab1, tab2, tab3 = st.tabs(["Anomaly Browser", "Model Comparison", "PCA Explorer"])
+    # Sidebar with parameter counts
+    st.sidebar.header("Model Parameters")
+    for model_name, count in param_counts.items():
+        st.sidebar.metric(model_name, f"{count:,}")
+
+    tab1, tab2, tab3, tab4 = st.tabs(["Anomaly Browser", "Model Comparison", "PCA Explorer", "Model Stability"])
 
     # --- Tab 1: Anomaly Browser ---
     with tab1:
         st.subheader("Top Anomalies")
-        sort_by = st.selectbox("Sort by", ["Combined", "Isolation Forest", "Autoencoder"])
+        sort_by = st.selectbox("Sort by", ["Combined", "Isolation Forest", "Autoencoder", "OC-SVM", "DAGMM"])
         top_n = st.slider("Show top N", 10, 500, 100)
 
         if sort_by == "Combined":
-            order = np.argsort(-(if_scores + ae_scores))
+            order = np.argsort(-(if_scores + ae_scores + ocsvm_scores + dagmm_scores))
         elif sort_by == "Isolation Forest":
             order = np.argsort(-if_scores)
-        else:
+        elif sort_by == "Autoencoder":
             order = np.argsort(-ae_scores)
+        elif sort_by == "OC-SVM":
+            order = np.argsort(-ocsvm_scores)
+        else:
+            order = np.argsort(-dagmm_scores)
 
         top_indices = order[:top_n]
         table_data = metadata.iloc[top_indices].copy()
         table_data["if_score"] = if_scores[top_indices]
         table_data["ae_score"] = ae_scores[top_indices]
+        table_data["ocsvm_score"] = ocsvm_scores[top_indices]
+        table_data["dagmm_score"] = dagmm_scores[top_indices]
+        table_data["category"] = [categories[i] for i in top_indices]
         table_data["index"] = top_indices
 
         selected = st.dataframe(
@@ -81,33 +110,40 @@ def main():
                 plot_spectrum(spectra, wl, spectrum_idx, f"Spectrum: {meta.get('filename', spectrum_idx)}"),
                 use_container_width=True,
             )
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
             col1.metric("IF Score", f"{if_scores[spectrum_idx]:.4f}")
             col2.metric("AE Score", f"{ae_scores[spectrum_idx]:.4f}")
-            col3.metric("Spectral Type", meta.get("subclass", "N/A"))
+            col3.metric("OC-SVM Score", f"{ocsvm_scores[spectrum_idx]:.4f}")
+            col4.metric("DAGMM Score", f"{dagmm_scores[spectrum_idx]:.4f}")
 
     # --- Tab 2: Model Comparison ---
     with tab2:
-        st.subheader("Isolation Forest vs Autoencoder Scores")
+        st.subheader("Model Score Comparison (Scatter Matrix)")
         scatter_df = pd.DataFrame({
             "IF Score": if_scores,
             "AE Score": ae_scores,
-            "Spectral Type": metadata.get("subclass", "unknown"),
+            "OC-SVM Score": ocsvm_scores,
+            "DAGMM Score": dagmm_scores,
         })
-        fig = px.scatter(
-            scatter_df, x="IF Score", y="AE Score", color="Spectral Type",
-            opacity=0.5, height=600,
-            title="Model Agreement: IF vs AE Anomaly Scores",
+        fig = px.scatter_matrix(
+            scatter_df,
+            dimensions=["IF Score", "AE Score", "OC-SVM Score", "DAGMM Score"],
+            opacity=0.3, height=800,
+            title="Pairwise Model Score Comparisons",
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        n_agreed = int(comparison["agreed"].sum()) if "agreed" in comparison.columns else 0
-        st.metric("Spectra flagged by BOTH models (top 100)", n_agreed)
+        if "n_models_agreed" in comparison.columns:
+            all_agreed = int((comparison["n_models_agreed"] == 4).sum())
+            st.metric("Spectra flagged by ALL 4 models (top 100)", all_agreed)
+        elif "agreed" in comparison.columns:
+            n_agreed = int(comparison["agreed"].sum())
+            st.metric("Spectra flagged by BOTH models (top 100)", n_agreed)
 
     # --- Tab 3: PCA Explorer ---
     with tab3:
         st.subheader("PCA Latent Space")
-        color_by = st.selectbox("Color by", ["IF Score", "AE Score", "Spectral Type"])
+        color_by = st.selectbox("Color by", ["IF Score", "AE Score", "OC-SVM Score", "DAGMM Score", "Spectral Type"])
 
         pca_df = pd.DataFrame({
             "PC1": pca_components[:, 0],
@@ -115,6 +151,8 @@ def main():
             "PC3": pca_components[:, 2] if pca_components.shape[1] > 2 else 0,
             "IF Score": if_scores,
             "AE Score": ae_scores,
+            "OC-SVM Score": ocsvm_scores,
+            "DAGMM Score": dagmm_scores,
             "Spectral Type": metadata.get("subclass", "unknown"),
         })
 
@@ -130,6 +168,33 @@ def main():
                 opacity=0.4, height=700, title="PCA 3D Projection",
             )
         st.plotly_chart(fig, use_container_width=True)
+
+    # --- Tab 4: Model Stability ---
+    with tab4:
+        st.subheader("Model Stability (IF multi-seed)")
+        sorted_idx = np.argsort(-if_scores)[:200]
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=list(range(len(sorted_idx))),
+            y=if_scores[sorted_idx],
+            error_y=dict(type="data", array=if_stability_std[sorted_idx]),
+            name="IF Score +/- std",
+        ))
+        fig.update_layout(
+            title="Top 200 Anomalies: IF Score with Stability Error Bars",
+            xaxis_title="Rank", yaxis_title="IF Score", height=500,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Std heatmap for top anomalies
+        st.subheader("Score Stability (Standard Deviation)")
+        std_df = pd.DataFrame({
+            "Spectrum Index": sorted_idx,
+            "IF Score": if_scores[sorted_idx],
+            "IF Std": if_stability_std[sorted_idx],
+            "CV (Std/Score)": if_stability_std[sorted_idx] / (np.abs(if_scores[sorted_idx]) + 1e-8),
+        })
+        st.dataframe(std_df, use_container_width=True)
 
 
 if __name__ == "__main__":
