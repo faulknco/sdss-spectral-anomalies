@@ -84,6 +84,10 @@ def run(n_spectra: int = 5000, sn_min: float = 10.0):
         if col not in meta_df.columns:
             meta_df[col] = float("nan")
     meta_features = build_metadata_features(meta_df)
+    assert len(meta_features) == len(spectra), (
+        f"metadata rows ({len(meta_features)}) != spectra rows ({len(spectra)}); "
+        "spectra_metadata.parquet may be stale from a previous run"
+    )
 
     n = len(spectra)
     cal_size = max(1, int(0.2 * n))
@@ -101,6 +105,9 @@ def run(n_spectra: int = 5000, sn_min: float = 10.0):
     logger.info("=== Step 5c: Conformal calibration ===")
     conformal = SplitConformalCalibrator()
     conformal.fit(cond_ae_scores[cal_idx])
+    # p-values are computed for all spectra for dashboard browsing, but the conformal
+    # validity guarantee (super-uniform p-values under the null) only holds for cal_idx
+    # and truly new data — not for the train_idx spectra the model was trained on.
     cond_ae_pvalues = conformal.pvalues(cond_ae_scores)
     np.save(RESULTS_DIR / "conditional_ae_pvalues.npy", cond_ae_pvalues)
     with open(RESULTS_DIR / "conformal_threshold.json", "w") as f:
