@@ -117,3 +117,22 @@ def load_and_preprocess(
     spectra = preprocess_spectra(wavelengths, fluxes, target_grid)
     logger.info(f"Preprocessed {spectra.shape[0]} spectra to shape {spectra.shape}")
     return spectra, metadata
+
+
+METADATA_FEATURE_COLS = ["elodie_teff", "elodie_logg", "elodie_feh", "sn_median"]
+
+
+def build_metadata_features(metadata_df) -> np.ndarray:
+    """Extract and standardize stellar metadata into a float32 feature matrix.
+
+    Missing values are filled with column median. Columns are z-score standardized.
+    Returns array of shape (n_spectra, len(METADATA_FEATURE_COLS)).
+    """
+    df = metadata_df[METADATA_FEATURE_COLS].copy().astype(np.float64)
+    for col in df.columns:
+        median = df[col].median()
+        df[col] = df[col].fillna(median if np.isfinite(median) else 0.0)
+    mean = df.mean()
+    std = df.std().replace(0, 1)
+    df = (df - mean) / std
+    return df.values.astype(np.float32)

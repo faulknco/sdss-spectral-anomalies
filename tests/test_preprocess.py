@@ -59,3 +59,32 @@ def test_preprocess_spectra_returns_correct_shape():
     result = preprocess_spectra(wavelengths, fluxes, target_grid)
     assert result.shape == (n_spectra, 3500)
     assert not np.any(np.isnan(result))
+
+
+def test_build_metadata_features_shape():
+    import pandas as pd
+    from src.data.preprocess import build_metadata_features
+    df = pd.DataFrame({
+        "elodie_teff": [5000.0, 6000.0, np.nan, 7000.0],
+        "elodie_logg": [4.0, 4.5, 3.5, np.nan],
+        "elodie_feh": [-0.5, 0.0, 0.3, -0.2],
+        "sn_median": [20.0, 35.0, 15.0, 50.0],
+    })
+    features = build_metadata_features(df)
+    assert features.shape == (4, 4)
+    assert features.dtype == np.float32
+    assert np.all(np.isfinite(features))
+
+
+def test_build_metadata_features_standardized():
+    import pandas as pd
+    from src.data.preprocess import build_metadata_features
+    rng = np.random.default_rng(42)
+    df = pd.DataFrame({
+        "elodie_teff": rng.uniform(4000, 8000, 100),
+        "elodie_logg": rng.uniform(2.0, 5.0, 100),
+        "elodie_feh": rng.uniform(-1.5, 0.5, 100),
+        "sn_median": rng.uniform(10, 100, 100),
+    })
+    features = build_metadata_features(df)
+    assert np.abs(features.mean(axis=0)).max() < 0.1
