@@ -89,6 +89,9 @@ def load_and_preprocess(
     fluxes = []
     metadata = []
 
+    def _safe_float(arr, name, fallback=np.nan):
+        return float(arr[name][0]) if name in arr.dtype.names else fallback
+
     for fpath in fits_files:
         try:
             with astro_fits.open(fpath) as hdul:
@@ -97,9 +100,6 @@ def load_and_preprocess(
                 fluxes.append(parsed["flux"])
 
                 specobj = hdul["SPECOBJ"].data
-
-                def _safe_float(arr, name, fallback=np.nan):
-                    return float(arr[name][0]) if name in arr.dtype.names else fallback
 
                 metadata.append(_make_metadata_dict(
                     filename=fpath.name,
