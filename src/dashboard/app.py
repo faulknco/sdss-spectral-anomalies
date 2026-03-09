@@ -85,7 +85,7 @@ def main():
         top_n = st.slider("Show top N", 10, 500, 100)
 
         if sort_by == "Combined":
-            order = np.argsort(-(if_scores + ae_scores + ocsvm_scores + dagmm_scores))
+            order = np.argsort(-(if_scores + ae_scores + ocsvm_scores + dagmm_scores + cond_ae_scores))
         elif sort_by == "Isolation Forest":
             order = np.argsort(-if_scores)
         elif sort_by == "Autoencoder":
@@ -96,10 +96,8 @@ def main():
             order = np.argsort(-dagmm_scores)
         elif sort_by == "Conditional AE":
             order = np.argsort(-cond_ae_scores)
-        elif sort_by == "Conformal P-Value (most anomalous)":
+        else:  # Conformal P-Value (most anomalous)
             order = np.argsort(cond_ae_pvalues)  # smallest p-value first
-        else:
-            order = np.argsort(-dagmm_scores)
 
         top_indices = order[:top_n]
         table_data = metadata.iloc[top_indices].copy()
