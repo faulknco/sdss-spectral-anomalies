@@ -36,3 +36,25 @@ def compare_anomaly_scores(
     df["combined_rank"] = (df["if_rank"] + df["ae_rank"]) / 2
 
     return df
+
+
+def compare_n_models(
+    scores_dict: dict[str, np.ndarray],
+    top_n: int = 100,
+) -> pd.DataFrame:
+    """Compare anomaly rankings across N models."""
+    df = pd.DataFrame()
+    rank_cols = []
+
+    for name, scores in scores_dict.items():
+        df[f"{name}_score"] = scores
+        ranks = rankdata(-scores, method="ordinal")
+        df[f"{name}_rank"] = ranks
+        rank_cols.append(f"{name}_rank")
+
+    df["n_models_agreed"] = sum(
+        (df[col] <= top_n).astype(int) for col in rank_cols
+    )
+    df["combined_rank"] = df[rank_cols].mean(axis=1)
+
+    return df
