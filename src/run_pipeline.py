@@ -16,6 +16,9 @@ from src.models.stability import stability_run
 from src.features.categorize import categorize_anomalies
 from src.models.compare import compare_anomaly_scores, compare_n_models
 import json
+from src.models.conditional_autoencoder import train_conditional_autoencoder
+from src.models.conformal import SplitConformalCalibrator
+from src.data.preprocess import build_metadata_features, METADATA_FEATURE_COLS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -74,6 +77,35 @@ def run(n_spectra: int = 5000, sn_min: float = 10.0):
     dagmm_scores = dagmm_model.anomaly_score(spectra.astype(np.float32))
     np.save(RESULTS_DIR / "dagmm_scores.npy", dagmm_scores)
 
+    # Step 5: Conditional Autoencoder + Conformal Calibration
+    logger.info("=== Step 5: Training Conditional Autoencoder ===")
+    meta_df = pd.read_parquet(PROCESSED_DIR / "spectra_metadata.parquet")
+    for col in METADATA_FEATURE_COLS:
+        if col not in meta_df.columns:
+            meta_df[col] = float("nan")
+    meta_features = build_metadata_features(meta_df)
+
+    n = len(spectra)
+    cal_size = max(1, int(0.2 * n))
+    train_idx = np.arange(n - cal_size)
+    cal_idx = np.arange(n - cal_size, n)
+
+    cond_ae_model, cond_ae_losses = train_conditional_autoencoder(
+        spectra[train_idx].astype(np.float32), meta_features[train_idx], bottleneck_dim=64, epochs=50
+    )
+    np.save(RESULTS_DIR / "cond_ae_losses.npy", np.array(cond_ae_losses))
+
+    cond_ae_scores = cond_ae_model.reconstruction_error(spectra.astype(np.float32), meta_features)
+    np.save(RESULTS_DIR / "conditional_ae_scores.npy", cond_ae_scores)
+
+    logger.info("=== Step 5c: Conformal calibration ===")
+    conformal = SplitConformalCalibrator()
+    conformal.fit(cond_ae_scores[cal_idx])
+    cond_ae_pvalues = conformal.pvalues(cond_ae_scores)
+    np.save(RESULTS_DIR / "conditional_ae_pvalues.npy", cond_ae_pvalues)
+    with open(RESULTS_DIR / "conformal_threshold.json", "w") as f:
+        json.dump({"alpha": 0.05, "threshold": conformal.threshold(alpha=0.05)}, f, indent=2)
+
     # Step 5b: Stability runs
     logger.info("=== Step 5b: Multi-seed stability runs ===")
     def if_train_fn(spectra, seed):
@@ -96,13 +128,14 @@ def run(n_spectra: int = 5000, sn_min: float = 10.0):
         "autoencoder": model.param_count(),
         "ocsvm": ocsvm.param_count(),
         "dagmm": dagmm_model.param_count(),
+        "conditional_ae": cond_ae_model.param_count(),
     }
     with open(RESULTS_DIR / "param_counts.json", "w") as f:
         json.dump(param_counts, f, indent=2)
 
     # Step 7: Compare all models
     logger.info("=== Step 7: Comparing all models ===")
-    all_scores = {"if": if_scores, "ae": ae_scores, "ocsvm": ocsvm_scores, "dagmm": dagmm_scores}
+    all_scores = {"if": if_scores, "ae": ae_scores, "ocsvm": ocsvm_scores, "dagmm": dagmm_scores, "cond_ae": cond_ae_scores}
     comparison = compare_n_models(all_scores, top_n=100)
     comparison_with_meta = pd.concat([comparison, pd.DataFrame(meta_list)], axis=1)
     comparison_with_meta.to_parquet(RESULTS_DIR / "comparison.parquet")
