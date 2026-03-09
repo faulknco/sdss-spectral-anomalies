@@ -9,6 +9,8 @@ import plotly.graph_objects as go
 import streamlit as st
 from pathlib import Path
 
+from src.features.color import spectrum_to_rgb, rgb_to_hex
+
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 RESULTS_DIR = PROJECT_ROOT / "data" / "results"
@@ -110,6 +112,18 @@ def main():
                 plot_spectrum(spectra, wl, spectrum_idx, f"Spectrum: {meta.get('filename', spectrum_idx)}"),
                 use_container_width=True,
             )
+            # Perceived star color swatch
+            r, g, b = spectrum_to_rgb(wl, spectra[spectrum_idx])
+            hex_color = rgb_to_hex(r, g, b)
+            st.markdown(
+                f'<div style="display:flex;align-items:center;gap:12px;margin:8px 0">'
+                f'<div style="width:48px;height:48px;border-radius:50%;'
+                f'background:{hex_color};border:2px solid #444"></div>'
+                f'<span style="font-size:1.1em">Perceived color: '
+                f'<strong>{hex_color}</strong> (R={r} G={g} B={b})</span></div>',
+                unsafe_allow_html=True,
+            )
+
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("IF Score", f"{if_scores[spectrum_idx]:.4f}")
             col2.metric("AE Score", f"{ae_scores[spectrum_idx]:.4f}")
