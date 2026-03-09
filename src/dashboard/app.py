@@ -36,9 +36,15 @@ def load_data():
         with open(param_path) as f:
             param_counts = json.load(f)
 
+    cond_ae_scores_path = RESULTS_DIR / "conditional_ae_scores.npy"
+    cond_ae_pvalues_path = RESULTS_DIR / "conditional_ae_pvalues.npy"
+    cond_ae_scores = np.load(cond_ae_scores_path) if cond_ae_scores_path.exists() else np.zeros(len(if_scores))
+    cond_ae_pvalues = np.load(cond_ae_pvalues_path) if cond_ae_pvalues_path.exists() else np.ones(len(if_scores))
+
     return (spectra, metadata, comparison, pca_components,
             if_scores, ae_scores, ocsvm_scores, dagmm_scores,
-            if_stability_std, categories, param_counts, wavelength_grid)
+            if_stability_std, categories, param_counts, wavelength_grid,
+            cond_ae_scores, cond_ae_pvalues)
 
 
 def plot_spectrum(spectra, wavelength_grid, idx, title="Spectrum"):
@@ -62,19 +68,20 @@ def main():
 
     (spectra, metadata, comparison, pca_components,
      if_scores, ae_scores, ocsvm_scores, dagmm_scores,
-     if_stability_std, categories, param_counts, wl) = load_data()
+     if_stability_std, categories, param_counts, wl,
+     cond_ae_scores, cond_ae_pvalues) = load_data()
 
     # Sidebar with parameter counts
     st.sidebar.header("Model Parameters")
     for model_name, count in param_counts.items():
         st.sidebar.metric(model_name, f"{count:,}")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Anomaly Browser", "Model Comparison", "PCA Explorer", "Model Stability"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Anomaly Browser", "Model Comparison", "PCA Explorer", "Model Stability", "Conformal P-Values"])
 
     # --- Tab 1: Anomaly Browser ---
     with tab1:
         st.subheader("Top Anomalies")
-        sort_by = st.selectbox("Sort by", ["Combined", "Isolation Forest", "Autoencoder", "OC-SVM", "DAGMM"])
+        sort_by = st.selectbox("Sort by", ["Combined", "Isolation Forest", "Autoencoder", "OC-SVM", "DAGMM", "Conditional AE", "Conformal P-Value (most anomalous)"])
         top_n = st.slider("Show top N", 10, 500, 100)
 
         if sort_by == "Combined":
@@ -85,6 +92,12 @@ def main():
             order = np.argsort(-ae_scores)
         elif sort_by == "OC-SVM":
             order = np.argsort(-ocsvm_scores)
+        elif sort_by == "DAGMM":
+            order = np.argsort(-dagmm_scores)
+        elif sort_by == "Conditional AE":
+            order = np.argsort(-cond_ae_scores)
+        elif sort_by == "Conformal P-Value (most anomalous)":
+            order = np.argsort(cond_ae_pvalues)  # smallest p-value first
         else:
             order = np.argsort(-dagmm_scores)
 
@@ -94,6 +107,8 @@ def main():
         table_data["ae_score"] = ae_scores[top_indices]
         table_data["ocsvm_score"] = ocsvm_scores[top_indices]
         table_data["dagmm_score"] = dagmm_scores[top_indices]
+        table_data["cond_ae_score"] = cond_ae_scores[top_indices]
+        table_data["cond_ae_pvalue"] = cond_ae_pvalues[top_indices]
         table_data["category"] = [categories[i] for i in top_indices]
         table_data["index"] = top_indices
 
@@ -129,6 +144,10 @@ def main():
             col2.metric("AE Score", f"{ae_scores[spectrum_idx]:.4f}")
             col3.metric("OC-SVM Score", f"{ocsvm_scores[spectrum_idx]:.4f}")
             col4.metric("DAGMM Score", f"{dagmm_scores[spectrum_idx]:.4f}")
+
+            col5, col6 = st.columns(2)
+            col5.metric("Cond AE Score", f"{cond_ae_scores[spectrum_idx]:.4f}")
+            col6.metric("Conformal p-value", f"{cond_ae_pvalues[spectrum_idx]:.4f}")
 
     # --- Tab 2: Model Comparison ---
     with tab2:
@@ -209,6 +228,28 @@ def main():
             "CV (Std/Score)": if_stability_std[sorted_idx] / (np.abs(if_scores[sorted_idx]) + 1e-8),
         })
         st.dataframe(std_df, use_container_width=True)
+
+    # --- Tab 5: Conformal P-Values ---
+    with tab5:
+        st.subheader("Conditional AE: Conformal P-Value Distribution")
+        fig = go.Figure()
+        fig.add_trace(go.Histogram(x=cond_ae_pvalues, nbinsx=50, name="p-values",
+                                   marker_color="steelblue", opacity=0.75))
+        fig.update_layout(xaxis_title="Conformal p-value", yaxis_title="Count",
+                          title="Uniform = well-calibrated; spike near 0 = anomalies", height=400)
+        st.plotly_chart(fig, use_container_width=True)
+
+        alpha = st.slider("Flag anomalies at p-value <=", 0.01, 0.20, 0.05, step=0.01)
+        n_flagged = int((cond_ae_pvalues <= alpha).sum())
+        st.metric(f"Spectra flagged at alpha={alpha}", n_flagged)
+
+        flagged_idx = np.where(cond_ae_pvalues <= alpha)[0]
+        if len(flagged_idx) > 0:
+            flagged_df = metadata.iloc[flagged_idx].copy()
+            flagged_df["cond_ae_score"] = cond_ae_scores[flagged_idx]
+            flagged_df["cond_ae_pvalue"] = cond_ae_pvalues[flagged_idx]
+            st.dataframe(flagged_df.sort_values("cond_ae_pvalue").reset_index(drop=True),
+                         use_container_width=True)
 
 
 if __name__ == "__main__":
