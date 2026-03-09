@@ -59,3 +59,16 @@ def test_threshold_returns_float():
     cal = SplitConformalCalibrator()
     cal.fit(rng.standard_normal(500))
     assert isinstance(cal.threshold(alpha=0.05), float)
+
+
+def test_threshold_matches_pvalue_decision_boundary():
+    cal = SplitConformalCalibrator().fit(np.array([1.0, 2.0, 3.0, 4.0, 5.0]))
+    threshold = cal.threshold(alpha=0.2)
+    assert threshold == 5.0
+    assert cal.pvalues(np.array([threshold]))[0] > 0.2
+    assert cal.pvalues(np.array([threshold + 1e-6]))[0] <= 0.2
+
+
+def test_threshold_can_be_infinite_when_alpha_too_small():
+    cal = SplitConformalCalibrator().fit(np.array([1.0, 2.0, 3.0]))
+    assert np.isinf(cal.threshold(alpha=0.01))

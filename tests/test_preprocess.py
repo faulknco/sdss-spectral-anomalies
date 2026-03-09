@@ -96,3 +96,40 @@ def test_build_metadata_features_standardized():
     })
     features = build_metadata_features(df)
     assert np.abs(features.mean(axis=0)).max() < 0.1
+
+
+def test_build_metadata_features_single_row_is_finite():
+    import pandas as pd
+    from src.data.preprocess import build_metadata_features
+    df = pd.DataFrame({
+        "elodie_teff": [5000.0],
+        "elodie_logg": [4.5],
+        "elodie_feh": [0.0],
+        "sn_median": [20.0],
+    })
+    features = build_metadata_features(df)
+    assert features.shape == (1, 4)
+    assert np.all(np.isfinite(features))
+    np.testing.assert_allclose(features, np.zeros((1, 4), dtype=np.float32))
+
+
+def test_build_metadata_features_can_reuse_train_stats():
+    import pandas as pd
+    from src.data.preprocess import build_metadata_features
+    train_df = pd.DataFrame({
+        "elodie_teff": [5000.0, 6000.0, 7000.0],
+        "elodie_logg": [4.0, 4.5, 5.0],
+        "elodie_feh": [-0.5, 0.0, 0.5],
+        "sn_median": [10.0, 20.0, 30.0],
+    })
+    test_df = pd.DataFrame({
+        "elodie_teff": [6500.0],
+        "elodie_logg": [4.25],
+        "elodie_feh": [0.25],
+        "sn_median": [25.0],
+    })
+    train_features, stats = build_metadata_features(train_df, return_stats=True)
+    test_features = build_metadata_features(test_df, stats=stats)
+    assert train_features.shape == (3, 4)
+    assert test_features.shape == (1, 4)
+    assert np.all(np.isfinite(test_features))

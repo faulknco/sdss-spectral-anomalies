@@ -32,4 +32,15 @@ class SplitConformalCalibrator:
     def threshold(self, alpha: float = 0.05) -> float:
         if not hasattr(self, "calibration_scores_"):
             raise RuntimeError("Call fit() before threshold()")
-        return float(np.quantile(self.calibration_scores_, 1 - alpha))
+        if not 0 < alpha < 1:
+            raise ValueError("alpha must be in (0, 1)")
+
+        m = len(self.calibration_scores_)
+        min_pvalue = 1.0 / (m + 1)
+        if alpha < min_pvalue:
+            return float("inf")
+
+        sorted_scores = np.sort(self.calibration_scores_)
+        rank = int(np.ceil((1.0 - alpha) * (m + 1)))
+        rank = min(max(rank, 1), m)
+        return float(sorted_scores[rank - 1])

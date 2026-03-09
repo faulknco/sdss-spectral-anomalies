@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from scipy.interpolate import interp1d
 
 logger = logging.getLogger(__name__)
@@ -134,17 +135,40 @@ def load_and_preprocess(
 METADATA_FEATURE_COLS = ["elodie_teff", "elodie_logg", "elodie_feh", "sn_median"]
 
 
-def build_metadata_features(metadata_df) -> np.ndarray:
+def build_metadata_features(metadata_df, stats: dict | None = None, return_stats: bool = False):
     """Extract and standardize stellar metadata into a float32 feature matrix.
 
     Missing values are filled with column median. Columns are z-score standardized.
     Returns array of shape (n_spectra, len(METADATA_FEATURE_COLS)).
     """
     df = metadata_df[METADATA_FEATURE_COLS].copy().astype(np.float64)
-    for col in df.columns:
-        median = df[col].median()
-        df[col] = df[col].fillna(median if np.isfinite(median) else 0.0)
-    mean = df.mean()
-    std = df.std().replace(0, 1)
-    df = (df - mean) / std
-    return df.values.astype(np.float32)
+    if stats is None:
+        medians = df.median()
+        medians = medians.where(np.isfinite(medians), 0.0)
+        filled = df.fillna(medians)
+        mean = filled.mean()
+        std = filled.std()
+        std = std.where(np.isfinite(std) & (std != 0), 1.0)
+        stats = {
+            "medians": medians.to_dict(),
+            "mean": mean.to_dict(),
+            "std": std.to_dict(),
+        }
+    else:
+        medians = np.array([stats["medians"][col] for col in METADATA_FEATURE_COLS], dtype=np.float64)
+        mean = np.array([stats["mean"][col] for col in METADATA_FEATURE_COLS], dtype=np.float64)
+        std = np.array([stats["std"][col] for col in METADATA_FEATURE_COLS], dtype=np.float64)
+        medians = np.where(np.isfinite(medians), medians, 0.0)
+        mean = np.where(np.isfinite(mean), mean, 0.0)
+        std = np.where(np.isfinite(std) & (std != 0), std, 1.0)
+        filled = df.fillna(pd.Series(medians, index=METADATA_FEATURE_COLS))
+        features = (filled.values - mean) / std
+        features = features.astype(np.float32)
+        if return_stats:
+            return features, stats
+        return features
+
+    features = ((filled - mean) / std).values.astype(np.float32)
+    if return_stats:
+        return features, stats
+    return features

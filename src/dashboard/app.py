@@ -38,13 +38,19 @@ def load_data():
 
     cond_ae_scores_path = RESULTS_DIR / "conditional_ae_scores.npy"
     cond_ae_pvalues_path = RESULTS_DIR / "conditional_ae_pvalues.npy"
+    cond_ae_calibration_mask_path = RESULTS_DIR / "conditional_ae_calibration_mask.npy"
     cond_ae_scores = np.load(cond_ae_scores_path) if cond_ae_scores_path.exists() else np.zeros(len(if_scores))
     cond_ae_pvalues = np.load(cond_ae_pvalues_path) if cond_ae_pvalues_path.exists() else np.ones(len(if_scores))
+    cond_ae_calibration_mask = (
+        np.load(cond_ae_calibration_mask_path)
+        if cond_ae_calibration_mask_path.exists()
+        else np.zeros(len(if_scores), dtype=bool)
+    )
 
     return (spectra, metadata, comparison, pca_components,
             if_scores, ae_scores, ocsvm_scores, dagmm_scores,
             if_stability_std, categories, param_counts, wavelength_grid,
-            cond_ae_scores, cond_ae_pvalues)
+            cond_ae_scores, cond_ae_pvalues, cond_ae_calibration_mask)
 
 
 def plot_spectrum(spectra, wavelength_grid, idx, title="Spectrum"):
@@ -69,7 +75,7 @@ def main():
     (spectra, metadata, comparison, pca_components,
      if_scores, ae_scores, ocsvm_scores, dagmm_scores,
      if_stability_std, categories, param_counts, wl,
-     cond_ae_scores, cond_ae_pvalues) = load_data()
+     cond_ae_scores, cond_ae_pvalues, cond_ae_calibration_mask) = load_data()
 
     # Sidebar with parameter counts
     st.sidebar.header("Model Parameters")
@@ -97,7 +103,12 @@ def main():
         elif sort_by == "Conditional AE":
             order = np.argsort(-cond_ae_scores)
         else:  # Conformal P-Value (most anomalous)
-            order = np.argsort(cond_ae_pvalues)  # smallest p-value first
+            valid_idx = np.where(cond_ae_calibration_mask)[0]
+            invalid_idx = np.where(~cond_ae_calibration_mask)[0]
+            order = np.concatenate([
+                valid_idx[np.argsort(cond_ae_pvalues[valid_idx])],
+                invalid_idx,
+            ])
 
         top_indices = order[:top_n]
         table_data = metadata.iloc[top_indices].copy()
@@ -107,6 +118,7 @@ def main():
         table_data["dagmm_score"] = dagmm_scores[top_indices]
         table_data["cond_ae_score"] = cond_ae_scores[top_indices]
         table_data["cond_ae_pvalue"] = cond_ae_pvalues[top_indices]
+        table_data["conformal_valid"] = cond_ae_calibration_mask[top_indices]
         table_data["category"] = [categories[i] for i in top_indices]
         table_data["index"] = top_indices
 
@@ -146,6 +158,10 @@ def main():
             col5, col6 = st.columns(2)
             col5.metric("Cond AE Score", f"{cond_ae_scores[spectrum_idx]:.4f}")
             col6.metric("Conformal p-value", f"{cond_ae_pvalues[spectrum_idx]:.4f}")
+            if cond_ae_calibration_mask[spectrum_idx]:
+                st.caption("Conformal p-value is valid for this held-out calibration row.")
+            else:
+                st.caption("Conformal p-value shown for reference only; this row was used in training.")
 
     # --- Tab 2: Model Comparison ---
     with tab2:
@@ -155,18 +171,20 @@ def main():
             "AE Score": ae_scores,
             "OC-SVM Score": ocsvm_scores,
             "DAGMM Score": dagmm_scores,
+            "Conditional AE Score": cond_ae_scores,
         })
         fig = px.scatter_matrix(
             scatter_df,
-            dimensions=["IF Score", "AE Score", "OC-SVM Score", "DAGMM Score"],
+            dimensions=["IF Score", "AE Score", "OC-SVM Score", "DAGMM Score", "Conditional AE Score"],
             opacity=0.3, height=800,
             title="Pairwise Model Score Comparisons",
         )
         st.plotly_chart(fig, use_container_width=True)
 
         if "n_models_agreed" in comparison.columns:
-            all_agreed = int((comparison["n_models_agreed"] == 4).sum())
-            st.metric("Spectra flagged by ALL 4 models (top 100)", all_agreed)
+            n_models = len([col for col in comparison.columns if col.endswith("_rank")])
+            all_agreed = int((comparison["n_models_agreed"] == n_models).sum())
+            st.metric(f"Spectra flagged by ALL {n_models} models (top 100)", all_agreed)
         elif "agreed" in comparison.columns:
             n_agreed = int(comparison["agreed"].sum())
             st.metric("Spectra flagged by BOTH models (top 100)", n_agreed)
@@ -230,24 +248,29 @@ def main():
     # --- Tab 5: Conformal P-Values ---
     with tab5:
         st.subheader("Conditional AE: Conformal P-Value Distribution")
-        fig = go.Figure()
-        fig.add_trace(go.Histogram(x=cond_ae_pvalues, nbinsx=50, name="p-values",
-                                   marker_color="steelblue", opacity=0.75))
-        fig.update_layout(xaxis_title="Conformal p-value", yaxis_title="Count",
-                          title="Uniform = well-calibrated; spike near 0 = anomalies", height=400)
-        st.plotly_chart(fig, use_container_width=True)
+        valid_pvalues = cond_ae_pvalues[cond_ae_calibration_mask]
+        if len(valid_pvalues) == 0:
+            st.info("No held-out calibration mask found. Conformal p-values are unavailable for calibrated browsing.")
+        else:
+            st.caption("Only held-out calibration rows are shown here. Training-row p-values are not presented as calibrated.")
+            fig = go.Figure()
+            fig.add_trace(go.Histogram(x=valid_pvalues, nbinsx=50, name="p-values",
+                                       marker_color="steelblue", opacity=0.75))
+            fig.update_layout(xaxis_title="Conformal p-value", yaxis_title="Count",
+                              title="Uniform = well-calibrated; spike near 0 = anomalies", height=400)
+            st.plotly_chart(fig, use_container_width=True)
 
-        alpha = st.slider("Flag anomalies at p-value <=", 0.01, 0.20, 0.05, step=0.01)
-        n_flagged = int((cond_ae_pvalues <= alpha).sum())
-        st.metric(f"Spectra flagged at alpha={alpha}", n_flagged)
+            alpha = st.slider("Flag anomalies at p-value <=", 0.01, 0.20, 0.05, step=0.01)
+            flagged_idx = np.where(cond_ae_calibration_mask & (cond_ae_pvalues <= alpha))[0]
+            n_flagged = int(len(flagged_idx))
+            st.metric(f"Held-out rows flagged at alpha={alpha}", n_flagged)
 
-        flagged_idx = np.where(cond_ae_pvalues <= alpha)[0]
-        if len(flagged_idx) > 0:
-            flagged_df = metadata.iloc[flagged_idx].copy()
-            flagged_df["cond_ae_score"] = cond_ae_scores[flagged_idx]
-            flagged_df["cond_ae_pvalue"] = cond_ae_pvalues[flagged_idx]
-            st.dataframe(flagged_df.sort_values("cond_ae_pvalue").reset_index(drop=True),
-                         use_container_width=True)
+            if len(flagged_idx) > 0:
+                flagged_df = metadata.iloc[flagged_idx].copy()
+                flagged_df["cond_ae_score"] = cond_ae_scores[flagged_idx]
+                flagged_df["cond_ae_pvalue"] = cond_ae_pvalues[flagged_idx]
+                st.dataframe(flagged_df.sort_values("cond_ae_pvalue").reset_index(drop=True),
+                             use_container_width=True)
 
 
 if __name__ == "__main__":

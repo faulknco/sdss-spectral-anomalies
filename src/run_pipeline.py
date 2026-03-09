@@ -83,16 +83,27 @@ def run(n_spectra: int = 5000, sn_min: float = 10.0):
     for col in METADATA_FEATURE_COLS:
         if col not in meta_df.columns:
             meta_df[col] = float("nan")
-    meta_features = build_metadata_features(meta_df)
-    assert len(meta_features) == len(spectra), (
-        f"metadata rows ({len(meta_features)}) != spectra rows ({len(spectra)}); "
+    assert len(meta_df) == len(spectra), (
+        f"metadata rows ({len(meta_df)}) != spectra rows ({len(spectra)}); "
         "spectra_metadata.parquet may be stale from a previous run"
     )
 
     n = len(spectra)
     cal_size = max(1, int(0.2 * n))
-    train_idx = np.arange(n - cal_size)
-    cal_idx = np.arange(n - cal_size, n)
+    rng = np.random.default_rng(42)
+    permutation = rng.permutation(n)
+    cal_idx = np.sort(permutation[:cal_size])
+    train_idx = np.sort(permutation[cal_size:])
+
+    _, meta_stats = build_metadata_features(meta_df.iloc[train_idx], return_stats=True)
+    meta_features = build_metadata_features(meta_df, stats=meta_stats)
+
+    train_mask = np.zeros(n, dtype=bool)
+    calibration_mask = np.zeros(n, dtype=bool)
+    train_mask[train_idx] = True
+    calibration_mask[cal_idx] = True
+    np.save(RESULTS_DIR / "conditional_ae_train_mask.npy", train_mask)
+    np.save(RESULTS_DIR / "conditional_ae_calibration_mask.npy", calibration_mask)
 
     cond_ae_model, cond_ae_losses = train_conditional_autoencoder(
         spectra[train_idx].astype(np.float32), meta_features[train_idx], bottleneck_dim=64, epochs=50
@@ -105,13 +116,16 @@ def run(n_spectra: int = 5000, sn_min: float = 10.0):
     logger.info("=== Step 5c: Conformal calibration ===")
     conformal = SplitConformalCalibrator()
     conformal.fit(cond_ae_scores[cal_idx])
-    # p-values are computed for all spectra for dashboard browsing, but the conformal
-    # validity guarantee (super-uniform p-values under the null) only holds for cal_idx
-    # and truly new data — not for the train_idx spectra the model was trained on.
     cond_ae_pvalues = conformal.pvalues(cond_ae_scores)
     np.save(RESULTS_DIR / "conditional_ae_pvalues.npy", cond_ae_pvalues)
+    threshold = conformal.threshold(alpha=0.05)
     with open(RESULTS_DIR / "conformal_threshold.json", "w") as f:
-        json.dump({"alpha": 0.05, "threshold": conformal.threshold(alpha=0.05)}, f, indent=2)
+        json.dump({
+            "alpha": 0.05,
+            "threshold": None if not np.isfinite(threshold) else threshold,
+            "comparison": ">",
+            "valid_for": "calibration_or_new_data",
+        }, f, indent=2)
 
     # Step 5b: Stability runs
     logger.info("=== Step 5b: Multi-seed stability runs ===")
