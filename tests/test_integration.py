@@ -9,6 +9,10 @@ from src.models.dagmm import train_dagmm
 from src.models.compare import compare_anomaly_scores, compare_n_models
 from src.models.stability import stability_run
 from src.features.categorize import categorize_anomalies
+from src.models.conditional_autoencoder import train_conditional_autoencoder
+from src.models.conformal import SplitConformalCalibrator
+from src.data.preprocess import build_metadata_features
+import pandas as pd
 
 
 def test_full_pipeline_synthetic():
@@ -90,3 +94,36 @@ def test_full_pipeline_synthetic():
     assert len(categories) == 100
     valid = {"continuum", "line", "noise", "normal"}
     assert all(c in valid for c in categories)
+
+    # Conditional Autoencoder
+    meta_df = pd.DataFrame({
+        "elodie_teff": rng.uniform(4000, 8000, n_spectra),
+        "elodie_logg": rng.uniform(2.0, 5.0, n_spectra),
+        "elodie_feh": rng.uniform(-1.5, 0.5, n_spectra),
+        "sn_median": rng.uniform(10, 100, n_spectra),
+    })
+    meta_features = build_metadata_features(meta_df)
+    assert meta_features.shape == (n_spectra, 4)
+
+    cal_size = 20
+    train_idx = np.arange(n_spectra - cal_size)
+    cal_idx = np.arange(n_spectra - cal_size, n_spectra)
+
+    cond_ae_model, cond_ae_losses = train_conditional_autoencoder(
+        spectra[train_idx].astype(np.float32),
+        meta_features[train_idx],
+        bottleneck_dim=16, epochs=3, batch_size=16,
+    )
+    assert len(cond_ae_losses) == 3
+    assert cond_ae_model.param_count() > 0
+
+    cond_ae_scores = cond_ae_model.reconstruction_error(spectra.astype(np.float32), meta_features)
+    assert cond_ae_scores.shape == (n_spectra,)
+    assert np.all(cond_ae_scores >= 0)
+
+    conformal = SplitConformalCalibrator()
+    conformal.fit(cond_ae_scores[cal_idx])
+    pvals = conformal.pvalues(cond_ae_scores)
+    assert pvals.shape == (n_spectra,)
+    assert np.all(pvals >= 0) and np.all(pvals <= 1)
+    assert isinstance(conformal.threshold(alpha=0.05), float)
