@@ -31,6 +31,23 @@ def test_normalize_spectrum_handles_zero_median():
     assert np.all(np.isfinite(normalized))
 
 
+def test_metadata_includes_stellar_params():
+    from src.data.preprocess import _make_metadata_dict
+    meta = _make_metadata_dict(
+        filename="spec-0001-50000-0001.fits",
+        ra=180.0,
+        dec=45.0,
+        subclass="G5",
+        sn_median=25.0,
+        teff=5500.0,
+        logg=4.4,
+        feh=-0.1,
+    )
+    assert meta["elodie_teff"] == 5500.0
+    assert meta["elodie_logg"] == 4.4
+    assert meta["elodie_feh"] == -0.1
+
+
 def test_preprocess_spectra_returns_correct_shape():
     n_spectra = 5
     n_original = 500

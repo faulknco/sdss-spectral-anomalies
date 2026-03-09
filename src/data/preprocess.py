@@ -10,6 +10,28 @@ logger = logging.getLogger(__name__)
 DEFAULT_GRID = np.linspace(3800, 9200, 3500)
 
 
+def _make_metadata_dict(
+    filename: str,
+    ra: float,
+    dec: float,
+    subclass: str,
+    sn_median: float,
+    teff: float,
+    logg: float,
+    feh: float,
+) -> dict:
+    return {
+        "filename": filename,
+        "ra": ra,
+        "dec": dec,
+        "subclass": subclass,
+        "sn_median": sn_median,
+        "elodie_teff": teff,
+        "elodie_logg": logg,
+        "elodie_feh": feh,
+    }
+
+
 def resample_spectrum(
     wavelength: np.ndarray,
     flux: np.ndarray,
@@ -75,15 +97,20 @@ def load_and_preprocess(
                 fluxes.append(parsed["flux"])
 
                 specobj = hdul["SPECOBJ"].data
-                metadata.append({
-                    "filename": fpath.name,
-                    "ra": float(specobj["RA"][0]),
-                    "dec": float(specobj["DEC"][0]),
-                    "subclass": str(specobj["SUBCLASS"][0]).strip(),
-                    "sn_median": float(specobj["SN_MEDIAN_ALL"][0])
-                    if "SN_MEDIAN_ALL" in specobj.dtype.names
-                    else 0.0,
-                })
+
+                def _safe_float(arr, name, fallback=np.nan):
+                    return float(arr[name][0]) if name in arr.dtype.names else fallback
+
+                metadata.append(_make_metadata_dict(
+                    filename=fpath.name,
+                    ra=float(specobj["RA"][0]),
+                    dec=float(specobj["DEC"][0]),
+                    subclass=str(specobj["SUBCLASS"][0]).strip(),
+                    sn_median=_safe_float(specobj, "SN_MEDIAN_ALL", 0.0),
+                    teff=_safe_float(specobj, "ELODIE_TEFF"),
+                    logg=_safe_float(specobj, "ELODIE_LOGG"),
+                    feh=_safe_float(specobj, "ELODIE_FEH"),
+                ))
         except Exception as e:
             logger.warning(f"Failed to load {fpath.name}: {e}")
 
