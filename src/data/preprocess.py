@@ -99,17 +99,29 @@ def load_and_preprocess(
                 wavelengths.append(parsed["wavelength"])
                 fluxes.append(parsed["flux"])
 
-                specobj = hdul["SPECOBJ"].data
+                # SDSS-II uses SPECOBJ, BOSS uses SPALL
+                if "SPECOBJ" in hdul:
+                    meta_ext = hdul["SPECOBJ"].data
+                elif "SPALL" in hdul:
+                    meta_ext = hdul["SPALL"].data
+                else:
+                    raise KeyError("No SPECOBJ or SPALL extension found")
+
+                # RA/DEC: try RA first, fall back to PLUG_RA
+                ra = _safe_float(meta_ext, "RA",
+                     _safe_float(meta_ext, "PLUG_RA", np.nan))
+                dec = _safe_float(meta_ext, "DEC",
+                      _safe_float(meta_ext, "PLUG_DEC", np.nan))
 
                 metadata.append(_make_metadata_dict(
                     filename=fpath.name,
-                    ra=float(specobj["RA"][0]),
-                    dec=float(specobj["DEC"][0]),
-                    subclass=str(specobj["SUBCLASS"][0]).strip(),
-                    sn_median=_safe_float(specobj, "SN_MEDIAN_ALL", 0.0),
-                    teff=_safe_float(specobj, "ELODIE_TEFF"),
-                    logg=_safe_float(specobj, "ELODIE_LOGG"),
-                    feh=_safe_float(specobj, "ELODIE_FEH"),
+                    ra=ra,
+                    dec=dec,
+                    subclass=str(meta_ext["SUBCLASS"][0]).strip(),
+                    sn_median=_safe_float(meta_ext, "SN_MEDIAN_ALL", 0.0),
+                    teff=_safe_float(meta_ext, "ELODIE_TEFF"),
+                    logg=_safe_float(meta_ext, "ELODIE_LOGG"),
+                    feh=_safe_float(meta_ext, "ELODIE_FEH"),
                 ))
         except Exception as e:
             logger.warning(f"Failed to load {fpath.name}: {e}")

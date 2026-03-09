@@ -61,6 +61,14 @@ def test_preprocess_spectra_returns_correct_shape():
     assert not np.any(np.isnan(result))
 
 
+def test_load_and_preprocess_empty_dir_returns_empty(tmp_path):
+    """load_and_preprocess on an empty directory returns empty arrays."""
+    from src.data.preprocess import load_and_preprocess, DEFAULT_GRID
+    spectra, metadata = load_and_preprocess(tmp_path, DEFAULT_GRID)
+    assert spectra.shape[0] == 0
+    assert metadata == []
+
+
 def test_build_metadata_features_shape():
     import pandas as pd
     from src.data.preprocess import build_metadata_features
