@@ -16,12 +16,17 @@ class SplitConformalCalibrator:
         self.calibration_scores_ = np.array(calibration_scores, dtype=np.float64)
         return self
 
-    def pvalues(self, test_scores: np.ndarray) -> np.ndarray:
+    def pvalues(self, test_scores: np.ndarray, chunk_size: int = 1000) -> np.ndarray:
         if not hasattr(self, "calibration_scores_"):
             raise RuntimeError("Call fit() before pvalues()")
         test = np.array(test_scores, dtype=np.float64)
         m = len(self.calibration_scores_)
-        counts = (self.calibration_scores_[:, None] >= test[None, :]).sum(axis=0)
+        counts = np.empty(len(test), dtype=np.int64)
+        for start in range(0, len(test), chunk_size):
+            chunk = test[start : start + chunk_size]
+            counts[start : start + chunk_size] = (
+                self.calibration_scores_[:, None] >= chunk[None, :]
+            ).sum(axis=0)
         return (counts + 1) / (m + 1)
 
     def threshold(self, alpha: float = 0.05) -> float:

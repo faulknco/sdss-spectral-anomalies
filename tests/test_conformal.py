@@ -48,6 +48,12 @@ def test_raises_if_not_fitted():
         cal.pvalues(np.array([1.0]))
 
 
+def test_threshold_raises_if_not_fitted():
+    cal = SplitConformalCalibrator()
+    with pytest.raises(RuntimeError, match="fit"):
+        cal.threshold()
+
+
 def test_threshold_returns_float():
     rng = np.random.default_rng(0)
     cal = SplitConformalCalibrator()
