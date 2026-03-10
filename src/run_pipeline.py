@@ -1,5 +1,6 @@
 # src/run_pipeline.py
 """Main pipeline: download, preprocess, train models, compare, save results."""
+import argparse
 import logging
 from pathlib import Path
 
@@ -14,11 +15,17 @@ from src.models.ocsvm import OCSVMDetector
 from src.models.dagmm import train_dagmm
 from src.models.stability import stability_run
 from src.features.categorize import categorize_anomalies
-from src.models.compare import compare_anomaly_scores, compare_n_models
+from src.models.compare import adaptive_top_n, compare_anomaly_scores, compare_n_models
 import json
 from src.models.conditional_autoencoder import train_conditional_autoencoder
 from src.models.conformal import SplitConformalCalibrator
 from src.data.preprocess import build_metadata_features, METADATA_FEATURE_COLS
+from src.data.download import (
+    DEFAULT_DOWNLOAD_TIMEOUT,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_QUERY_TIMEOUT,
+    DOWNLOAD_TRANSPORTS,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -29,26 +36,69 @@ PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 RESULTS_DIR = PROJECT_ROOT / "data" / "results"
 
 
-def run(n_spectra: int = 5000, sn_min: float = 10.0):
-    """Run the full anomaly detection pipeline."""
+def _effective_n_components(spectra: np.ndarray, requested: int = 50) -> int:
+    max_components = min(spectra.shape[0], spectra.shape[1])
+    if max_components < 1:
+        raise ValueError("spectra array must contain at least one sample and one feature")
+    return min(requested, max_components)
+
+
+def run(
+    n_spectra: int = 5000,
+    sn_min: float = 10.0,
+    metadata_only: bool = False,
+    download_mode: str = "missing",
+    query_timeout: int = DEFAULT_QUERY_TIMEOUT,
+    download_timeout: int = DEFAULT_DOWNLOAD_TIMEOUT,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    download_transport: str = "auto",
+):
+    """Run the full anomaly detection pipeline.
+
+    ``download_mode``:
+    - ``"missing"``: query SDSS metadata and download any missing local FITS
+    - ``"skip"``: skip remote FITS downloads and use only existing local FITS
+    """
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    if download_mode not in {"missing", "skip"}:
+        raise ValueError("download_mode must be 'missing' or 'skip'")
 
     # Step 1: Download
-    logger.info("=== Step 1: Downloading spectra ===")
-    metadata_df = query_stellar_metadata(limit=n_spectra, sn_min=sn_min)
-    metadata_df.to_parquet(PROCESSED_DIR / "metadata.parquet")
-    download_spectra(metadata_df, RAW_DIR)
+    if download_mode == "skip":
+        logger.info("=== Step 1: Skipping remote metadata/download; using local FITS only ===")
+        metadata_path = PROCESSED_DIR / "metadata.parquet"
+        if metadata_path.exists():
+            metadata_df = pd.read_parquet(metadata_path)
+        else:
+            metadata_df = pd.DataFrame()
+    else:
+        logger.info("=== Step 1: Downloading spectra ===")
+        metadata_df = query_stellar_metadata(limit=n_spectra, sn_min=sn_min, timeout=query_timeout)
+        metadata_df.to_parquet(PROCESSED_DIR / "metadata.parquet")
+        if metadata_only:
+            logger.info("Metadata-only mode enabled; skipping FITS download and model training.")
+            return metadata_df
+        download_spectra(
+            metadata_df,
+            RAW_DIR,
+            timeout=download_timeout,
+            max_retries=max_retries,
+            transport=download_transport,
+        )
 
     # Step 2: Preprocess
     logger.info("=== Step 2: Preprocessing spectra ===")
     spectra, meta_list = load_and_preprocess(RAW_DIR, DEFAULT_GRID)
+    if len(spectra) == 0:
+        raise RuntimeError("No local FITS spectra available to preprocess")
     np.save(PROCESSED_DIR / "spectra.npy", spectra)
     pd.DataFrame(meta_list).to_parquet(PROCESSED_DIR / "spectra_metadata.parquet")
+    n_components = _effective_n_components(spectra, requested=50)
 
     # Step 3: Classical model
     logger.info("=== Step 3: Training PCA + Isolation Forest ===")
-    classical = ClassicalAnomalyDetector(n_components=50, contamination=0.05)
+    classical = ClassicalAnomalyDetector(n_components=n_components, contamination=0.05)
     classical.fit(spectra)
     if_scores = classical.score(spectra)
     pca_errors = classical.reconstruction_error(spectra)
@@ -59,7 +109,7 @@ def run(n_spectra: int = 5000, sn_min: float = 10.0):
 
     # Step 3b: OC-SVM
     logger.info("=== Step 3b: Training OC-SVM ===")
-    ocsvm = OCSVMDetector(n_components=50)
+    ocsvm = OCSVMDetector(n_components=n_components)
     ocsvm.fit(spectra)
     ocsvm_scores = ocsvm.score(spectra)
     np.save(RESULTS_DIR / "ocsvm_scores.npy", ocsvm_scores)
@@ -130,7 +180,11 @@ def run(n_spectra: int = 5000, sn_min: float = 10.0):
     # Step 5b: Stability runs
     logger.info("=== Step 5b: Multi-seed stability runs ===")
     def if_train_fn(spectra, seed):
-        det = ClassicalAnomalyDetector(n_components=50, contamination=0.05, random_state=seed)
+        det = ClassicalAnomalyDetector(
+            n_components=_effective_n_components(spectra, requested=50),
+            contamination=0.05,
+            random_state=seed,
+        )
         det.fit(spectra)
         return det.score(spectra)
 
@@ -157,15 +211,93 @@ def run(n_spectra: int = 5000, sn_min: float = 10.0):
     # Step 7: Compare all models
     logger.info("=== Step 7: Comparing all models ===")
     all_scores = {"if": if_scores, "ae": ae_scores, "ocsvm": ocsvm_scores, "dagmm": dagmm_scores, "cond_ae": cond_ae_scores}
-    comparison = compare_n_models(all_scores, top_n=100)
+    comparison_top_n = adaptive_top_n(len(spectra))
+    comparison = compare_n_models(all_scores, top_n=comparison_top_n)
     comparison_with_meta = pd.concat([comparison, pd.DataFrame(meta_list)], axis=1)
     comparison_with_meta.to_parquet(RESULTS_DIR / "comparison.parquet")
+    with open(RESULTS_DIR / "comparison_config.json", "w") as f:
+        json.dump({
+            "top_n": comparison_top_n,
+            "fraction": 0.1,
+            "min_top_n": 25,
+            "max_top_n": 100,
+            "n_spectra": len(spectra),
+        }, f, indent=2)
 
     top_agreed = comparison_with_meta[comparison_with_meta["n_models_agreed"] >= 3].sort_values("combined_rank")
     top_agreed.to_parquet(RESULTS_DIR / "top_anomalies_agreed.parquet")
+    focused_review = (
+        comparison_with_meta
+        .sort_values(["n_models_agreed", "combined_rank"], ascending=[False, True])
+        .head(min(10, len(comparison_with_meta)))
+        .copy()
+    )
+    focused_review.insert(0, "focus_rank", np.arange(1, len(focused_review) + 1))
+    focused_review["agreement_fraction"] = focused_review["n_models_agreed"] / len(all_scores)
+    focused_review.to_parquet(RESULTS_DIR / "focused_review.parquet")
 
-    logger.info(f"Pipeline complete. {len(top_agreed)} anomalies agreed by 3+ models.")
+    logger.info(
+        "Pipeline complete. %s anomalies agreed by 3+ models within top-%s per-model ranks.",
+        len(top_agreed),
+        comparison_top_n,
+    )
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run the SDSS spectral anomaly pipeline.")
+    parser.add_argument("--n-spectra", type=int, default=5000, help="Number of spectra to query from SDSS.")
+    parser.add_argument("--sn-min", type=float, default=10.0, help="Minimum S/N threshold for SDSS query.")
+    parser.add_argument(
+        "--metadata-only",
+        action="store_true",
+        help="Query and persist metadata only; skip FITS downloads and model training.",
+    )
+    parser.add_argument(
+        "--download-mode",
+        choices=["missing", "skip"],
+        default="missing",
+        help="Download missing FITS from SDSS or use only existing local FITS.",
+    )
+    parser.add_argument(
+        "--query-timeout",
+        type=int,
+        default=DEFAULT_QUERY_TIMEOUT,
+        help="Timeout in seconds for the SDSS metadata query.",
+    )
+    parser.add_argument(
+        "--download-timeout",
+        type=int,
+        default=DEFAULT_DOWNLOAD_TIMEOUT,
+        help="Timeout in seconds for each SDSS FITS download request.",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=DEFAULT_MAX_RETRIES,
+        help="Maximum retries per SDSS FITS download.",
+    )
+    parser.add_argument(
+        "--download-transport",
+        choices=sorted(DOWNLOAD_TRANSPORTS),
+        default="auto",
+        help="Transport for FITS downloads: auto, rsync, https, or astroquery.",
+    )
+    return parser
+
+
+def main() -> None:
+    args = build_arg_parser().parse_args()
+    run(
+        n_spectra=args.n_spectra,
+        sn_min=args.sn_min,
+        metadata_only=args.metadata_only,
+        download_mode=args.download_mode,
+        query_timeout=args.query_timeout,
+        download_timeout=args.download_timeout,
+        max_retries=args.max_retries,
+        download_transport=args.download_transport,
+    )
 
 
 if __name__ == "__main__":
-    run()
+    main()

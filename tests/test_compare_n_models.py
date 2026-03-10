@@ -1,6 +1,6 @@
 """Tests for N-model comparison."""
 import numpy as np
-from src.models.compare import compare_n_models
+from src.models.compare import adaptive_top_n, compare_n_models
 
 
 def test_compare_n_models_basic():
@@ -28,3 +28,10 @@ def test_compare_n_models_agreement():
         scores[name] = s
     result = compare_n_models(scores, top_n=10)
     assert result["n_models_agreed"].iloc[0] == 3
+
+
+def test_adaptive_top_n_scales_with_dataset_size():
+    assert adaptive_top_n(10) == 10
+    assert adaptive_top_n(50) == 25
+    assert adaptive_top_n(229) == 25
+    assert adaptive_top_n(1000) == 100

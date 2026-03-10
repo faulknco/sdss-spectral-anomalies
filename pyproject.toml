@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
 [project]
 name = "sdss-spectral-anomalies"
 version = "0.1.0"
@@ -21,6 +25,15 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.2",
 ]
+
+[project.scripts]
+sdss-anomalies = "src.run_pipeline:main"
+
+[tool.uv]
+package = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
 
 [tool.ruff]
 line-length = 100

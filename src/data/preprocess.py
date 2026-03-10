@@ -13,6 +13,9 @@ DEFAULT_GRID = np.linspace(3800, 9200, 3500)
 
 def _make_metadata_dict(
     filename: str,
+    plate: int,
+    mjd: int,
+    fiberid: int,
     ra: float,
     dec: float,
     subclass: str,
@@ -23,6 +26,9 @@ def _make_metadata_dict(
 ) -> dict:
     return {
         "filename": filename,
+        "plate": plate,
+        "mjd": mjd,
+        "fiberid": fiberid,
         "ra": ra,
         "dec": dec,
         "subclass": subclass,
@@ -81,7 +87,7 @@ def load_and_preprocess(
 ) -> tuple[np.ndarray, list[dict]]:
     """Load FITS files from a directory and return preprocessed spectra + metadata."""
     from astropy.io import fits as astro_fits
-    from src.data.download import parse_spectrum_fits
+    from src.data.download import parse_sdss_filename, parse_spectrum_fits
 
     fits_files = sorted(fits_dir.glob("spec-*.fits"))
     logger.info(f"Loading {len(fits_files)} FITS files from {fits_dir}")
@@ -99,6 +105,7 @@ def load_and_preprocess(
                 parsed = parse_spectrum_fits(hdul["COADD"].data)
                 wavelengths.append(parsed["wavelength"])
                 fluxes.append(parsed["flux"])
+                plate, mjd, fiberid = parse_sdss_filename(fpath.name)
 
                 # SDSS-II uses SPECOBJ, BOSS uses SPALL
                 if "SPECOBJ" in hdul:
@@ -116,6 +123,9 @@ def load_and_preprocess(
 
                 metadata.append(_make_metadata_dict(
                     filename=fpath.name,
+                    plate=plate,
+                    mjd=mjd,
+                    fiberid=fiberid,
                     ra=ra,
                     dec=dec,
                     subclass=str(meta_ext["SUBCLASS"][0]).strip(),
@@ -130,6 +140,36 @@ def load_and_preprocess(
     spectra = preprocess_spectra(wavelengths, fluxes, target_grid)
     logger.info(f"Preprocessed {spectra.shape[0]} spectra to shape {spectra.shape}")
     return spectra, metadata
+
+
+def load_or_fetch_processed_spectrum(
+    metadata_row,
+    raw_dir: Path,
+    target_grid: np.ndarray = DEFAULT_GRID,
+) -> np.ndarray:
+    """Load a processed spectrum from local FITS, fetching the FITS on demand if needed."""
+    from astropy.io import fits as astro_fits
+    from src.data.download import (
+        build_sdss_filename,
+        fetch_spectrum_file,
+        parse_spectrum_fits,
+        spectrum_identifiers_from_metadata,
+    )
+
+    plate, mjd, fiberid, run2d = spectrum_identifiers_from_metadata(metadata_row)
+    filename = build_sdss_filename(plate, mjd, fiberid)
+    fpath = raw_dir / filename
+    if not fpath.exists():
+        fetched = fetch_spectrum_file(plate, mjd, fiberid, raw_dir, run2d=run2d)
+        if fetched is None:
+            raise FileNotFoundError(f"Could not fetch {filename} from SDSS")
+        fpath = fetched
+
+    with astro_fits.open(fpath) as hdul:
+        parsed = parse_spectrum_fits(hdul["COADD"].data)
+    return normalize_spectrum(
+        resample_spectrum(parsed["wavelength"], parsed["flux"], target_grid)
+    )
 
 
 METADATA_FEATURE_COLS = ["elodie_teff", "elodie_logg", "elodie_feh", "sn_median"]

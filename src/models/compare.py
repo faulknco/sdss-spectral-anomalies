@@ -4,6 +4,19 @@ import pandas as pd
 from scipy.stats import rankdata
 
 
+def adaptive_top_n(
+    n_samples: int,
+    min_top_n: int = 25,
+    max_top_n: int = 100,
+    fraction: float = 0.1,
+) -> int:
+    """Choose a comparison cutoff that scales with dataset size."""
+    if n_samples < 1:
+        raise ValueError("n_samples must be positive")
+    scaled = int(np.ceil(n_samples * fraction))
+    return min(max_top_n, max(min_top_n, scaled, 1), n_samples)
+
+
 def rank_anomalies(
     scores: np.ndarray,
     metadata: list[dict],

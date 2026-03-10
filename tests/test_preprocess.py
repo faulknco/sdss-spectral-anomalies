@@ -35,6 +35,9 @@ def test_metadata_includes_stellar_params():
     from src.data.preprocess import _make_metadata_dict
     meta = _make_metadata_dict(
         filename="spec-0001-50000-0001.fits",
+        plate=1,
+        mjd=50000,
+        fiberid=1,
         ra=180.0,
         dec=45.0,
         subclass="G5",
@@ -43,6 +46,9 @@ def test_metadata_includes_stellar_params():
         logg=4.4,
         feh=-0.1,
     )
+    assert meta["plate"] == 1
+    assert meta["mjd"] == 50000
+    assert meta["fiberid"] == 1
     assert meta["elodie_teff"] == 5500.0
     assert meta["elodie_logg"] == 4.4
     assert meta["elodie_feh"] == -0.1
@@ -133,3 +139,30 @@ def test_build_metadata_features_can_reuse_train_stats():
     assert train_features.shape == (3, 4)
     assert test_features.shape == (1, 4)
     assert np.all(np.isfinite(test_features))
+
+
+def test_load_or_fetch_processed_spectrum_uses_existing_file(monkeypatch, tmp_path):
+    import pandas as pd
+    from src.data.preprocess import DEFAULT_GRID, load_or_fetch_processed_spectrum
+
+    expected = np.linspace(0.5, 1.5, len(DEFAULT_GRID))
+
+    class DummyOpen:
+        def __enter__(self):
+            return {"COADD": type("Obj", (), {"data": object()})()}
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    fpath = tmp_path / "spec-0001-50000-0001.fits"
+    fpath.touch()
+
+    monkeypatch.setattr("astropy.io.fits.open", lambda _: DummyOpen())
+    monkeypatch.setattr(
+        "src.data.download.parse_spectrum_fits",
+        lambda _: {"wavelength": DEFAULT_GRID, "flux": expected},
+    )
+
+    row = pd.Series({"plate": 1, "mjd": 50000, "fiberid": 1})
+    spectrum = load_or_fetch_processed_spectrum(row, tmp_path)
+    np.testing.assert_allclose(spectrum, expected / np.median(expected))
