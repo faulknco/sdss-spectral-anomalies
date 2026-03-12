@@ -84,6 +84,7 @@ class ConditionalRealNVP(nn.Module):
     ):
         super().__init__()
         self.n_components = n_components
+        self.meta_dim = meta_dim
 
         self.meta_embedder = nn.Sequential(
             nn.Linear(meta_dim, 32),
@@ -123,7 +124,7 @@ class ConditionalRealNVP(nn.Module):
             total_log_det += log_det
         return z, total_log_det
 
-    def _nll(self, z_out: torch.Tensor, total_log_det: torch.Tensor) -> torch.Tensor:
+    def nll(self, z_out: torch.Tensor, total_log_det: torch.Tensor) -> torch.Tensor:
         D = z_out.size(1)
         return 0.5 * (z_out ** 2).sum(dim=1) + 0.5 * D * math.log(2 * math.pi) - total_log_det
 
@@ -131,9 +132,8 @@ class ConditionalRealNVP(nn.Module):
         return sum(p.numel() for p in self.parameters())
 
     def _pca_transform(self, spectra: np.ndarray) -> np.ndarray:
-        assert self.pca is not None and self.scaler is not None, (
-            "Model has no fitted PCA — call train_normalizing_flow first"
-        )
+        if self.pca is None or self.scaler is None:
+            raise RuntimeError("Model has no fitted PCA — call train_normalizing_flow first")
         return self.pca.transform(self.scaler.transform(spectra))
 
     @torch.no_grad()
@@ -144,9 +144,12 @@ class ConditionalRealNVP(nn.Module):
         z_np = self._pca_transform(spectra.astype(np.float32))
         z = torch.tensor(z_np, dtype=torch.float32)
         meta = torch.tensor(metadata.copy(), dtype=torch.float32)
-        meta[~torch.isfinite(meta)] = 0.0
+        if metadata.shape[1] != self.meta_dim:
+            raise ValueError(
+                f"metadata has {metadata.shape[1]} columns but model expects {self.meta_dim}"
+            )
         z_out, log_det = self.forward(z, meta)
-        scores = self._nll(z_out, log_det).numpy()
+        scores = self.nll(z_out, log_det).numpy()
         if was_training:
             self.train()
         return scores
@@ -205,7 +208,7 @@ def train_normalizing_flow(
         for z_batch, meta_batch in loader:
             z_batch, meta_batch = z_batch.to(device), meta_batch.to(device)
             z_out, log_det = model(z_batch, meta_batch)
-            loss = model._nll(z_out, log_det).mean()
+            loss = model.nll(z_out, log_det).mean()
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
