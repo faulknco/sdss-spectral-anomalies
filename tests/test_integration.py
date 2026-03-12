@@ -10,6 +10,7 @@ from src.models.compare import compare_anomaly_scores, compare_n_models
 from src.models.stability import stability_run
 from src.features.categorize import categorize_anomalies
 from src.models.conditional_autoencoder import train_conditional_autoencoder
+from src.models.normalizing_flow import train_normalizing_flow
 from src.models.conformal import SplitConformalCalibrator
 from src.data.preprocess import build_metadata_features
 import pandas as pd
@@ -127,3 +128,25 @@ def test_full_pipeline_synthetic():
     assert pvals.shape == (n_spectra,)
     assert np.all(pvals >= 0) and np.all(pvals <= 1)
     assert isinstance(conformal.threshold(alpha=0.05), float)
+
+    # Normalizing Flow
+    flow_model, flow_losses = train_normalizing_flow(
+        spectra[train_idx].astype(np.float32),
+        meta_features[train_idx],
+        n_components=10,
+        n_coupling=4,
+        hidden_dim=32,
+        epochs=3,
+        batch_size=16,
+    )
+    assert len(flow_losses) == 3
+    assert flow_model.param_count() > 0
+    flow_scores = flow_model.nll_score(spectra.astype(np.float32), meta_features)
+    assert flow_scores.shape == (n_spectra,)
+    assert np.all(np.isfinite(flow_scores))
+
+    # Verify flow scores integrate with compare_n_models (keeps all_scores in sync with pipeline)
+    all_scores_with_flow = {**all_scores, "flow": flow_scores}
+    n_comparison_flow = compare_n_models(all_scores_with_flow, top_n=10)
+    assert "n_models_agreed" in n_comparison_flow.columns
+    assert "combined_rank" in n_comparison_flow.columns

@@ -18,6 +18,7 @@ from src.features.categorize import categorize_anomalies
 from src.models.compare import adaptive_top_n, compare_anomaly_scores, compare_n_models
 import json
 from src.models.conditional_autoencoder import train_conditional_autoencoder
+from src.models.normalizing_flow import train_normalizing_flow
 from src.models.conformal import SplitConformalCalibrator
 from src.data.preprocess import build_metadata_features, METADATA_FEATURE_COLS
 from src.data.download import (
@@ -177,6 +178,18 @@ def run(
             "valid_for": "calibration_or_new_data",
         }, f, indent=2)
 
+    # Step 5d: Conditional Normalizing Flow
+    logger.info("=== Step 5d: Training Conditional Normalizing Flow ===")
+    flow_model, flow_losses = train_normalizing_flow(
+        spectra[train_idx].astype(np.float32),
+        meta_features[train_idx],
+        n_components=n_components,
+        epochs=50,
+    )
+    flow_scores = flow_model.nll_score(spectra.astype(np.float32), meta_features)
+    np.save(RESULTS_DIR / "flow_scores.npy", flow_scores)
+    np.save(RESULTS_DIR / "flow_losses.npy", np.array(flow_losses))
+
     # Step 5b: Stability runs
     logger.info("=== Step 5b: Multi-seed stability runs ===")
     def if_train_fn(spectra, seed):
@@ -204,13 +217,14 @@ def run(
         "ocsvm": ocsvm.param_count(),
         "dagmm": dagmm_model.param_count(),
         "conditional_ae": cond_ae_model.param_count(),
+        "flow": flow_model.param_count(),
     }
     with open(RESULTS_DIR / "param_counts.json", "w") as f:
         json.dump(param_counts, f, indent=2)
 
     # Step 7: Compare all models
     logger.info("=== Step 7: Comparing all models ===")
-    all_scores = {"if": if_scores, "ae": ae_scores, "ocsvm": ocsvm_scores, "dagmm": dagmm_scores, "cond_ae": cond_ae_scores}
+    all_scores = {"if": if_scores, "ae": ae_scores, "ocsvm": ocsvm_scores, "dagmm": dagmm_scores, "cond_ae": cond_ae_scores, "flow": flow_scores}
     comparison_top_n = adaptive_top_n(len(spectra))
     comparison = compare_n_models(all_scores, top_n=comparison_top_n)
     comparison_with_meta = pd.concat([comparison, pd.DataFrame(meta_list)], axis=1)
