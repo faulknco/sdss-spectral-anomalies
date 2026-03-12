@@ -25,7 +25,7 @@
 **Step 1: Initialize git repo**
 
 ```bash
-cd /Users/faulknco/Projects/sdss-spectral-anomalies
+cd .
 git init
 ```
 

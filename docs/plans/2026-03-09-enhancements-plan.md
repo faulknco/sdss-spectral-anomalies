@@ -58,7 +58,7 @@ def test_ocsvm_param_count():
 
 **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/faulknco/Projects/sdss-spectral-anomalies && uv run pytest tests/test_ocsvm.py -v`
+Run: `cd . && uv run pytest tests/test_ocsvm.py -v`
 Expected: FAIL with ModuleNotFoundError
 
 **Step 3: Write minimal implementation**
@@ -104,7 +104,7 @@ class OCSVMDetector:
 
 **Step 4: Run test to verify it passes**
 
-Run: `cd /Users/faulknco/Projects/sdss-spectral-anomalies && uv run pytest tests/test_ocsvm.py -v`
+Run: `cd . && uv run pytest tests/test_ocsvm.py -v`
 Expected: PASS (3 tests)
 
 **Step 5: Commit**
@@ -169,7 +169,7 @@ def test_dagmm_param_count():
 
 **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/faulknco/Projects/sdss-spectral-anomalies && uv run pytest tests/test_dagmm.py -v`
+Run: `cd . && uv run pytest tests/test_dagmm.py -v`
 Expected: FAIL with ModuleNotFoundError
 
 **Step 3: Write minimal implementation**
@@ -312,7 +312,7 @@ def train_dagmm(
 
 **Step 4: Run test to verify it passes**
 
-Run: `cd /Users/faulknco/Projects/sdss-spectral-anomalies && uv run pytest tests/test_dagmm.py -v`
+Run: `cd . && uv run pytest tests/test_dagmm.py -v`
 Expected: PASS (4 tests)
 
 **Step 5: Commit**
@@ -360,7 +360,7 @@ def test_autoencoder_param_count():
 
 **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/faulknco/Projects/sdss-spectral-anomalies && uv run pytest tests/test_param_count.py -v`
+Run: `cd . && uv run pytest tests/test_param_count.py -v`
 Expected: FAIL with AttributeError (no param_count method)
 
 **Step 3: Write minimal implementation**
@@ -385,7 +385,7 @@ Add to `src/models/autoencoder.py` (in `SpectralAutoencoder` class):
 
 **Step 4: Run test to verify it passes**
 
-Run: `cd /Users/faulknco/Projects/sdss-spectral-anomalies && uv run pytest tests/test_param_count.py -v`
+Run: `cd . && uv run pytest tests/test_param_count.py -v`
 Expected: PASS (2 tests)
 
 **Step 5: Commit**
@@ -443,7 +443,7 @@ def test_stability_run_single_run():
 
 **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/faulknco/Projects/sdss-spectral-anomalies && uv run pytest tests/test_stability.py -v`
+Run: `cd . && uv run pytest tests/test_stability.py -v`
 Expected: FAIL with ModuleNotFoundError
 
 **Step 3: Write minimal implementation**
@@ -488,7 +488,7 @@ def stability_run(
 
 **Step 4: Run test to verify it passes**
 
-Run: `cd /Users/faulknco/Projects/sdss-spectral-anomalies && uv run pytest tests/test_stability.py -v`
+Run: `cd . && uv run pytest tests/test_stability.py -v`
 Expected: PASS (3 tests)
 
 **Step 5: Commit**
@@ -548,7 +548,7 @@ def test_categorize_continuum_detection():
 
 **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/faulknco/Projects/sdss-spectral-anomalies && uv run pytest tests/test_categorize.py -v`
+Run: `cd . && uv run pytest tests/test_categorize.py -v`
 Expected: FAIL with ModuleNotFoundError
 
 **Step 3: Write minimal implementation**
@@ -611,7 +611,7 @@ def categorize_anomalies(
 
 **Step 4: Run test to verify it passes**
 
-Run: `cd /Users/faulknco/Projects/sdss-spectral-anomalies && uv run pytest tests/test_categorize.py -v`
+Run: `cd . && uv run pytest tests/test_categorize.py -v`
 Expected: PASS (3 tests)
 
 **Step 5: Commit**
@@ -668,7 +668,7 @@ def test_compare_n_models_agreement():
 
 **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/faulknco/Projects/sdss-spectral-anomalies && uv run pytest tests/test_compare_n_models.py -v`
+Run: `cd . && uv run pytest tests/test_compare_n_models.py -v`
 Expected: FAIL with ImportError
 
 **Step 3: Write minimal implementation**
@@ -711,7 +711,7 @@ def compare_n_models(
 
 **Step 4: Run test to verify it passes**
 
-Run: `cd /Users/faulknco/Projects/sdss-spectral-anomalies && uv run pytest tests/test_compare_n_models.py -v`
+Run: `cd . && uv run pytest tests/test_compare_n_models.py -v`
 Expected: PASS (2 tests)
 
 **Step 5: Commit**
@@ -993,7 +993,7 @@ def test_full_pipeline_synthetic():
 
 **Step 2: Run test to verify it passes**
 
-Run: `cd /Users/faulknco/Projects/sdss-spectral-anomalies && uv run pytest tests/test_integration.py -v`
+Run: `cd . && uv run pytest tests/test_integration.py -v`
 Expected: PASS
 
 **Step 3: Commit**

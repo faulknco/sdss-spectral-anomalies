@@ -16,10 +16,10 @@ Can we detect spectra that are anomalous relative to their expected stellar phys
 - Rank aggregation is heuristic. It does not provide a calibrated false alarm interpretation.
 
 Relevant code:
-- [src/data/download.py](/Users/faulknco/Projects/sdss-spectral-anomalies/src/data/download.py)
-- [src/data/preprocess.py](/Users/faulknco/Projects/sdss-spectral-anomalies/src/data/preprocess.py)
-- [src/run_pipeline.py](/Users/faulknco/Projects/sdss-spectral-anomalies/src/run_pipeline.py)
-- [src/models/compare.py](/Users/faulknco/Projects/sdss-spectral-anomalies/src/models/compare.py)
+- [src/data/download.py](./src/data/download.py)
+- [src/data/preprocess.py](./src/data/preprocess.py)
+- [src/run_pipeline.py](./src/run_pipeline.py)
+- [src/models/compare.py](./src/models/compare.py)
 
 ## Proposed Method
 
