@@ -146,7 +146,7 @@ def test_full_pipeline_synthetic():
     assert np.all(np.isfinite(flow_scores))
 
     # Verify flow scores integrate with compare_n_models (keeps all_scores in sync with pipeline)
-    all_scores_with_flow = {**all_scores, "flow": flow_scores}
+    all_scores_with_flow = {**all_scores, "cond_ae": cond_ae_scores, "flow": flow_scores}
     n_comparison_flow = compare_n_models(all_scores_with_flow, top_n=10)
     assert "n_models_agreed" in n_comparison_flow.columns
     assert "combined_rank" in n_comparison_flow.columns

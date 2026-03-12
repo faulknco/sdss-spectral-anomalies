@@ -224,7 +224,14 @@ def run(
 
     # Step 7: Compare all models
     logger.info("=== Step 7: Comparing all models ===")
-    all_scores = {"if": if_scores, "ae": ae_scores, "ocsvm": ocsvm_scores, "dagmm": dagmm_scores, "cond_ae": cond_ae_scores, "flow": flow_scores}
+    all_scores = {
+        "if": if_scores,
+        "ae": ae_scores,
+        "ocsvm": ocsvm_scores,
+        "dagmm": dagmm_scores,
+        "cond_ae": cond_ae_scores,
+        "flow": flow_scores,
+    }
     comparison_top_n = adaptive_top_n(len(spectra))
     comparison = compare_n_models(all_scores, top_n=comparison_top_n)
     comparison_with_meta = pd.concat([comparison, pd.DataFrame(meta_list)], axis=1)
