@@ -139,15 +139,15 @@ class ConditionalRealNVP(nn.Module):
     @torch.no_grad()
     def nll_score(self, spectra: np.ndarray, metadata: np.ndarray) -> np.ndarray:
         """Per-spectrum NLL anomaly score. Higher = more anomalous given metadata."""
+        if metadata.shape[1] != self.meta_dim:
+            raise ValueError(
+                f"metadata has {metadata.shape[1]} columns but model expects {self.meta_dim}"
+            )
         was_training = self.training
         self.eval()
         z_np = self._pca_transform(spectra.astype(np.float32))
         z = torch.tensor(z_np, dtype=torch.float32)
         meta = torch.tensor(metadata.copy(), dtype=torch.float32)
-        if metadata.shape[1] != self.meta_dim:
-            raise ValueError(
-                f"metadata has {metadata.shape[1]} columns but model expects {self.meta_dim}"
-            )
         z_out, log_det = self.forward(z, meta)
         scores = self.nll(z_out, log_det).numpy()
         if was_training:
