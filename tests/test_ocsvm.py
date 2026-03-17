@@ -32,3 +32,14 @@ def test_ocsvm_param_count():
     count = detector.param_count()
     assert isinstance(count, int)
     assert count > 0
+
+
+def test_ocsvm_subsamples_large_data():
+    rng = np.random.default_rng(42)
+    spectra = rng.normal(0, 1, (200, 500))
+    detector = OCSVMDetector(n_components=20, max_train_samples=50)
+    detector.fit(spectra)
+    scores = detector.score(spectra)
+    assert scores.shape == (200,)
+    assert np.all(np.isfinite(scores))
+    assert detector.svm.support_vectors_.shape[0] <= 50
