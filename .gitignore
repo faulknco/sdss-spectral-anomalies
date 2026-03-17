@@ -7,3 +7,4 @@ __pycache__/
 *.egg-info/
 dist/
 .firecrawl/
+!data/results/review_labels.parquet

@@ -244,6 +244,10 @@ def run(
     if not skip_pbh:
         from src.features.microlensing import microlensing_score
         from src.features.accretion import accretion_score
+        from src.features.line_asymmetry import line_asymmetry_score
+        from src.features.multiepoch import multiepoch_variability_scores, assign_multiepoch_scores
+        from src.features.gaia_crossmatch import query_gaia_for_candidates, score_astrometric_anomalies
+        from src.features.photometric_crossmatch import query_sdss_photometry, score_color_anomalies
 
         logger.info("=== Step 6b: PBH Feature Extraction ===")
         meta_df_pbh = pd.read_parquet(PROCESSED_DIR / "spectra_metadata.parquet")
@@ -251,6 +255,9 @@ def run(
         acc_scores = accretion_score(spectra, DEFAULT_GRID, meta_df_pbh)
         np.save(RESULTS_DIR / "microlensing_scores.npy", ml_scores)
         np.save(RESULTS_DIR / "accretion_scores.npy", acc_scores)
+
+        asym_scores = line_asymmetry_score(spectra, DEFAULT_GRID, meta_df_pbh)
+        np.save(RESULTS_DIR / "line_asymmetry_scores.npy", asym_scores)
 
         pbh_categories = categorize_pbh_candidates(ml_scores, acc_scores)
         np.save(RESULTS_DIR / "pbh_categories.npy", np.array(pbh_categories))
@@ -260,6 +267,52 @@ def run(
             sum(1 for c in pbh_categories if c == "accretion_candidate"),
             sum(1 for c in pbh_categories if c == "both_candidate"),
         )
+
+        # Step 6c: Multi-epoch variability search
+        logger.info("=== Step 6c: Multi-epoch variability search ===")
+        variability_df = multiepoch_variability_scores(spectra, meta_df_pbh, DEFAULT_GRID)
+        variability_df.to_parquet(RESULTS_DIR / "multiepoch_variability.parquet")
+        multiepoch_scores = assign_multiepoch_scores(variability_df, len(spectra))
+        np.save(RESULTS_DIR / "multiepoch_scores.npy", multiepoch_scores)
+        logger.info(
+            "Multi-epoch: %d groups found, %d spectra with repeat observations",
+            len(variability_df),
+            int((multiepoch_scores > 0).sum()),
+        )
+
+        # Step 6d: Gaia DR3 cross-match (PBH candidates only)
+        logger.info("=== Step 6d: Gaia DR3 cross-match ===")
+        pbh_candidate_idx = np.where(np.array(pbh_categories) != "none")[0]
+        if len(pbh_candidate_idx) > 0:
+            gaia_df = query_gaia_for_candidates(meta_df_pbh, candidate_indices=pbh_candidate_idx)
+            gaia_scored = score_astrometric_anomalies(gaia_df)
+            gaia_scored.to_parquet(RESULTS_DIR / "gaia_crossmatch.parquet")
+            logger.info(
+                "Gaia cross-match: %d / %d candidates matched, %d with RUWE > 1.4",
+                len(gaia_scored),
+                len(pbh_candidate_idx),
+                int(gaia_scored["ruwe_flag"].sum()) if len(gaia_scored) > 0 else 0,
+            )
+        else:
+            logger.info("No PBH candidates to cross-match with Gaia")
+            score_astrometric_anomalies(pd.DataFrame()).to_parquet(
+                RESULTS_DIR / "gaia_crossmatch.parquet"
+            )
+
+        # Step 6e: SDSS photometric cross-match
+        logger.info("=== Step 6e: SDSS photometric cross-match ===")
+        phot_df = query_sdss_photometry(meta_df_pbh, candidate_indices=pbh_candidate_idx)
+        phot_scored = score_color_anomalies(phot_df, meta_df_pbh)
+        phot_scored.to_parquet(RESULTS_DIR / "photometric_crossmatch.parquet")
+        if len(phot_scored) > 0:
+            logger.info(
+                "Photometry: %d / %d candidates matched, %d with blue excess",
+                len(phot_scored),
+                len(pbh_candidate_idx),
+                int(phot_scored["blue_excess_flag"].sum()),
+            )
+        else:
+            logger.info("No photometric matches found (SDSS may be unreachable)")
 
     # Parameter counts
     param_counts = {
@@ -284,6 +337,7 @@ def run(
     if not skip_pbh:
         comparison_with_meta["microlensing_score"] = ml_scores
         comparison_with_meta["accretion_score"] = acc_scores
+        comparison_with_meta["line_asymmetry_score"] = asym_scores
         comparison_with_meta["pbh_category"] = pbh_categories
     comparison_with_meta.to_parquet(RESULTS_DIR / "comparison.parquet")
     with open(RESULTS_DIR / "comparison_config.json", "w") as f:
@@ -306,6 +360,15 @@ def run(
     focused_review.insert(0, "focus_rank", np.arange(1, len(focused_review) + 1))
     focused_review["agreement_fraction"] = focused_review["n_models_agreed"] / len(all_scores)
     focused_review.to_parquet(RESULTS_DIR / "focused_review.parquet")
+
+    labels_path = RESULTS_DIR / "review_labels.parquet"
+    if labels_path.exists():
+        labels_df = pd.read_parquet(labels_path)
+        for col in labels_df.columns:
+            if col != "filename" and col in focused_review.columns:
+                focused_review = focused_review.drop(columns=[col])
+        focused_review = focused_review.merge(labels_df, on="filename", how="left")
+        focused_review.to_parquet(RESULTS_DIR / "focused_review.parquet")
 
     # Step 8: Semi-synthetic evaluation
     logger.info("=== Step 8: Semi-synthetic evaluation ===")
