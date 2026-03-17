@@ -18,18 +18,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.data.preprocess import DEFAULT_GRID, load_or_fetch_processed_spectrum
 from src.data.preprocess import build_metadata_features, METADATA_FEATURE_COLS
 from src.features.color import spectrum_to_rgb, rgb_to_hex
+from src.features.line_windows import DISPLAY_LINES
 
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 RAW_DIR = PROJECT_ROOT / "data" / "raw"
 RESULTS_DIR = PROJECT_ROOT / "data" / "results"
-SPECTRAL_LINES = [
-    ("Ca K", 3933.7),
-    ("Ca H", 3968.5),
-    ("Hγ", 4340.5),
-    ("Hβ", 4861.3),
-    ("Na D", 5892.0),
-    ("Hα", 6562.8),
-]
 
 
 @st.cache_data
@@ -75,11 +68,42 @@ def load_data():
         else pd.DataFrame()
     )
 
+    ml_scores_path = RESULTS_DIR / "microlensing_scores.npy"
+    acc_scores_path = RESULTS_DIR / "accretion_scores.npy"
+    pbh_categories_path = RESULTS_DIR / "pbh_categories.npy"
+    microlensing_scores = np.load(ml_scores_path) if ml_scores_path.exists() else None
+    accretion_scores = np.load(acc_scores_path) if acc_scores_path.exists() else None
+    pbh_categories = list(np.load(pbh_categories_path)) if pbh_categories_path.exists() else None
+
+    cvae_scores_path = RESULTS_DIR / "cvae_scores.npy"
+    cvae_pvalues_path = RESULTS_DIR / "cvae_pvalues.npy"
+    flow_scores_path = RESULTS_DIR / "flow_scores.npy"
+    flow_pvalues_path = RESULTS_DIR / "flow_pvalues.npy"
+    eval_results_path = RESULTS_DIR / "evaluation_results.json"
+
+    cvae_scores = np.load(cvae_scores_path) if cvae_scores_path.exists() else np.zeros(len(if_scores))
+    cvae_pvalues = np.load(cvae_pvalues_path) if cvae_pvalues_path.exists() else np.ones(len(if_scores))
+    flow_scores = np.load(flow_scores_path) if flow_scores_path.exists() else np.zeros(len(if_scores))
+    flow_pvalues = np.load(flow_pvalues_path) if flow_pvalues_path.exists() else np.ones(len(if_scores))
+    eval_results = None
+    if eval_results_path.exists():
+        with open(eval_results_path) as f:
+            eval_results = json.load(f)
+
+    multiepoch_path = RESULTS_DIR / "multiepoch_variability.parquet"
+    multiepoch_scores_path = RESULTS_DIR / "multiepoch_scores.npy"
+    gaia_path = RESULTS_DIR / "gaia_crossmatch.parquet"
+    multiepoch_df = pd.read_parquet(multiepoch_path) if multiepoch_path.exists() else pd.DataFrame()
+    multiepoch_scores = np.load(multiepoch_scores_path) if multiepoch_scores_path.exists() else None
+    gaia_df = pd.read_parquet(gaia_path) if gaia_path.exists() else pd.DataFrame()
+
     return (spectra, metadata, comparison, pca_components,
             if_scores, ae_scores, ocsvm_scores, dagmm_scores,
             if_stability_std, categories, param_counts, wavelength_grid,
             cond_ae_scores, cond_ae_pvalues, cond_ae_calibration_mask, comparison_config,
-            focused_review)
+            focused_review, microlensing_scores, accretion_scores, pbh_categories,
+            cvae_scores, cvae_pvalues, flow_scores, flow_pvalues, eval_results,
+            multiepoch_df, multiepoch_scores, gaia_df)
 
 
 @st.cache_data(show_spinner=False)
@@ -96,7 +120,7 @@ def plot_spectrum(spectra, wavelength_grid, idx, title="Spectrum", show_lines: b
     if show_lines:
         y_min = float(np.nanmin(spectra[idx]))
         y_max = float(np.nanmax(spectra[idx]))
-        for name, wavelength in SPECTRAL_LINES:
+        for name, wavelength in DISPLAY_LINES:
             fig.add_vline(x=wavelength, line_dash="dot", line_color="rgba(255,255,255,0.22)")
             fig.add_annotation(
                 x=wavelength,
@@ -260,7 +284,7 @@ def plot_neighbor_spectra(
         name="Candidate",
         line=dict(color="#ff6b35", width=2.5),
     ))
-    for name, wavelength in SPECTRAL_LINES:
+    for name, wavelength in DISPLAY_LINES:
         fig.add_vline(x=wavelength, line_dash="dot", line_color="rgba(255,255,255,0.15)")
     fig.update_layout(
         title=title,
@@ -308,30 +332,43 @@ def main():
      if_scores, ae_scores, ocsvm_scores, dagmm_scores,
      if_stability_std, categories, param_counts, wl,
      cond_ae_scores, cond_ae_pvalues, cond_ae_calibration_mask, comparison_config,
-     focused_review) = load_data()
+     focused_review, microlensing_scores, accretion_scores, pbh_categories,
+     cvae_scores, cvae_pvalues, flow_scores, flow_pvalues, eval_results,
+     multiepoch_df, multiepoch_scores, gaia_df) = load_data()
+
+    pbh_available = microlensing_scores is not None and accretion_scores is not None
 
     # Sidebar with parameter counts
     st.sidebar.header("Model Parameters")
     for model_name, count in param_counts.items():
         st.sidebar.metric(model_name, f"{count:,}")
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab_names = [
         "Anomaly Browser",
         "Model Comparison",
         "PCA Explorer",
         "Model Stability",
         "Conformal P-Values",
         "Focused Review",
-    ])
+        "Evaluation",
+    ]
+    if pbh_available:
+        tab_names.append("PBH Candidates")
+    tabs = st.tabs(tab_names)
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = tabs[:7]
+    tab_pbh = tabs[7] if pbh_available else None
 
     # --- Tab 1: Anomaly Browser ---
     with tab1:
         st.subheader("Top Anomalies")
-        sort_by = st.selectbox("Sort by", ["Combined", "Isolation Forest", "Autoencoder", "OC-SVM", "DAGMM", "Conditional AE", "Conformal P-Value (most anomalous)"])
+        sort_options = ["Combined", "Isolation Forest", "Autoencoder", "OC-SVM", "DAGMM", "Conditional AE", "CVAE", "Conditional Flow", "Conformal P-Value (most anomalous)"]
+        if pbh_available:
+            sort_options.extend(["Microlensing Score", "Accretion Score"])
+        sort_by = st.selectbox("Sort by", sort_options)
         top_n = st.slider("Show top N", 10, 500, 100)
 
         if sort_by == "Combined":
-            order = np.argsort(-(if_scores + ae_scores + ocsvm_scores + dagmm_scores + cond_ae_scores))
+            order = np.argsort(-(if_scores + ae_scores + ocsvm_scores + dagmm_scores + cond_ae_scores + cvae_scores + flow_scores))
         elif sort_by == "Isolation Forest":
             order = np.argsort(-if_scores)
         elif sort_by == "Autoencoder":
@@ -342,6 +379,14 @@ def main():
             order = np.argsort(-dagmm_scores)
         elif sort_by == "Conditional AE":
             order = np.argsort(-cond_ae_scores)
+        elif sort_by == "CVAE":
+            order = np.argsort(-cvae_scores)
+        elif sort_by == "Conditional Flow":
+            order = np.argsort(-flow_scores)
+        elif sort_by == "Microlensing Score" and pbh_available:
+            order = np.argsort(-microlensing_scores)
+        elif sort_by == "Accretion Score" and pbh_available:
+            order = np.argsort(-accretion_scores)
         else:  # Conformal P-Value (most anomalous)
             valid_idx = np.where(cond_ae_calibration_mask)[0]
             invalid_idx = np.where(~cond_ae_calibration_mask)[0]
@@ -357,6 +402,8 @@ def main():
         table_data["ocsvm_score"] = ocsvm_scores[top_indices]
         table_data["dagmm_score"] = dagmm_scores[top_indices]
         table_data["cond_ae_score"] = cond_ae_scores[top_indices]
+        table_data["cvae_score"] = cvae_scores[top_indices]
+        table_data["flow_score"] = flow_scores[top_indices]
         table_data["cond_ae_pvalue"] = cond_ae_pvalues[top_indices]
         table_data["conformal_valid"] = cond_ae_calibration_mask[top_indices]
         table_data["category"] = [categories[i] for i in top_indices]
@@ -399,6 +446,10 @@ def main():
             col5, col6 = st.columns(2)
             col5.metric("Cond AE Score", f"{cond_ae_scores[spectrum_idx]:.4f}")
             col6.metric("Conformal p-value", f"{cond_ae_pvalues[spectrum_idx]:.4f}")
+
+            col7, col8 = st.columns(2)
+            col7.metric("CVAE Score", f"{cvae_scores[spectrum_idx]:.4f}")
+            col8.metric("Flow Score", f"{flow_scores[spectrum_idx]:.4f}")
             if cond_ae_calibration_mask[spectrum_idx]:
                 st.caption("Conformal p-value is valid for this held-out calibration row.")
             else:
@@ -414,11 +465,13 @@ def main():
             "OC-SVM Score": ocsvm_scores,
             "DAGMM Score": dagmm_scores,
             "Conditional AE Score": cond_ae_scores,
+            "CVAE Score": cvae_scores,
+            "Flow Score": flow_scores,
         })
         fig = px.scatter_matrix(
             scatter_df,
-            dimensions=["IF Score", "AE Score", "OC-SVM Score", "DAGMM Score", "Conditional AE Score"],
-            opacity=0.3, height=800,
+            dimensions=list(scatter_df.columns),
+            opacity=0.3, height=900,
             title="Pairwise Model Score Comparisons",
         )
         st.plotly_chart(fig, use_container_width=True)
@@ -570,7 +623,7 @@ def main():
                 metric_df = pd.DataFrame({
                     "quantity": ["Agreement", "Combined Rank", "S/N", "Radius Proxy"],
                     "value": [
-                        f"{int(candidate['n_models_agreed'])}/5",
+                        f"{int(candidate['n_models_agreed'])}/{len([c for c in candidate.index if c.endswith('_rank')])}",
                         f"{candidate['combined_rank']:.1f}",
                         f"{candidate.get('sn_median', float('nan')):.2f}",
                         f"{radius_proxy:.2f} Rsun" if radius_proxy is not None else "not shown",
@@ -583,23 +636,16 @@ def main():
             p2.metric("log g", f"{candidate.get('elodie_logg', float('nan')):.3f}")
             p3.metric("[Fe/H]", f"{candidate.get('elodie_feh', float('nan')):.2f}")
 
-            rank_df = pd.DataFrame({
-                "model": ["IF", "AE", "OC-SVM", "DAGMM", "Cond AE"],
-                "rank": [
-                    int(candidate["if_rank"]),
-                    int(candidate["ae_rank"]),
-                    int(candidate["ocsvm_rank"]),
-                    int(candidate["dagmm_rank"]),
-                    int(candidate["cond_ae_rank"]),
-                ],
-                "score": [
-                    candidate["if_score"],
-                    candidate["ae_score"],
-                    candidate["ocsvm_score"],
-                    candidate["dagmm_score"],
-                    candidate["cond_ae_score"],
-                ],
-            }).sort_values("rank")
+            models = [("IF", "if"), ("AE", "ae"), ("OC-SVM", "ocsvm"),
+                      ("DAGMM", "dagmm"), ("Cond AE", "cond_ae"),
+                      ("CVAE", "cvae"), ("Flow", "flow")]
+            rank_rows = []
+            for label, key in models:
+                rank_col = f"{key}_rank"
+                score_col = f"{key}_score"
+                if rank_col in candidate.index and score_col in candidate.index:
+                    rank_rows.append({"model": label, "rank": int(candidate[rank_col]), "score": candidate[score_col]})
+            rank_df = pd.DataFrame(rank_rows).sort_values("rank")
             st.dataframe(rank_df.reset_index(drop=True), use_container_width=True)
 
             neighbor_idx = nearest_neighbor_indices(metadata, spectrum_idx, k=3)
@@ -639,6 +685,171 @@ def main():
                 "Radius proxy assumes roughly one solar mass and is suppressed for white-dwarf-like subclasses. "
                 "Treat it as a visual cue, not a measured radius."
             )
+
+    # --- Tab 7: Evaluation ---
+    with tab7:
+        st.subheader("Semi-Synthetic Evaluation Results")
+        if eval_results is None:
+            st.info("No evaluation results found. Run the pipeline to generate them.")
+        else:
+            model_names = list(eval_results.keys())
+
+            st.subheader("Overall Metrics")
+            metrics_df = pd.DataFrame({
+                "Model": model_names,
+                "AUROC": [eval_results[m]["auroc"] for m in model_names],
+                "AUPRC": [eval_results[m]["auprc"] for m in model_names],
+            }).sort_values("AUROC", ascending=False)
+            st.dataframe(metrics_df.reset_index(drop=True), use_container_width=True)
+
+            st.subheader("Precision @ k")
+            k_values = sorted(eval_results[model_names[0]]["precision_at_k"].keys(), key=lambda x: int(x))
+            prec_data = []
+            for m in model_names:
+                for k in k_values:
+                    prec_data.append({"Model": m, "k": int(k), "Precision": eval_results[m]["precision_at_k"][str(k)]})
+            prec_df = pd.DataFrame(prec_data)
+            fig = px.bar(prec_df, x="k", y="Precision", color="Model", barmode="group", height=400)
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.subheader("Per Anomaly Type Recall")
+            type_data = {}
+            for m in model_names:
+                ptr = eval_results[m].get("per_type_recall_at_k", {})
+                for t, val in ptr.items():
+                    type_data.setdefault(t, {})[m] = val
+            if type_data:
+                type_df = pd.DataFrame(type_data).T
+                type_df.index.name = "Anomaly Type"
+                fig = px.imshow(
+                    type_df.values,
+                    x=list(type_df.columns),
+                    y=list(type_df.index),
+                    color_continuous_scale="Blues",
+                    text_auto=".2f",
+                    height=400,
+                    title="Recall by Anomaly Type and Model",
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+    # --- Tab 8: PBH Candidates ---
+    if tab_pbh is not None:
+        with tab_pbh:
+            st.subheader("PBH Candidate Screening")
+            st.caption(
+                "High scores do NOT confirm PBH signatures. Many mundane astrophysical "
+                "phenomena (binaries, chromospheric activity, misclassified subclass, poor "
+                "sky subtraction) produce similar spectral features. Single-epoch "
+                "median-normalized spectra cannot measure absolute magnification. These "
+                "are exploratory screens for candidates warranting follow-up observation."
+            )
+
+            pbh_col1, pbh_col2 = st.columns(2)
+
+            # --- Microlensing candidates table ---
+            with pbh_col1:
+                st.markdown("### Microlensing Candidates")
+                ml_order = np.argsort(-microlensing_scores)
+                ml_top_n = st.slider("Top N microlensing", 10, 200, 50, key="ml_top")
+                ml_idx = ml_order[:ml_top_n]
+                ml_df = metadata.iloc[ml_idx].copy()
+                ml_df["microlensing_score"] = microlensing_scores[ml_idx]
+                ml_df["if_score"] = if_scores[ml_idx]
+                ml_df["ae_score"] = ae_scores[ml_idx]
+                ml_df["category"] = [categories[i] for i in ml_idx]
+                if pbh_categories is not None:
+                    ml_df["pbh_category"] = [pbh_categories[i] for i in ml_idx]
+                st.dataframe(ml_df.reset_index(drop=True), use_container_width=True)
+
+            # --- Accretion candidates table ---
+            with pbh_col2:
+                st.markdown("### Accretion Candidates")
+                acc_order = np.argsort(-accretion_scores)
+                acc_top_n = st.slider("Top N accretion", 10, 200, 50, key="acc_top")
+                acc_idx = acc_order[:acc_top_n]
+                acc_df = metadata.iloc[acc_idx].copy()
+                acc_df["accretion_score"] = accretion_scores[acc_idx]
+                acc_df["if_score"] = if_scores[acc_idx]
+                acc_df["ae_score"] = ae_scores[acc_idx]
+                acc_df["category"] = [categories[i] for i in acc_idx]
+                if pbh_categories is not None:
+                    acc_df["pbh_category"] = [pbh_categories[i] for i in acc_idx]
+                st.dataframe(acc_df.reset_index(drop=True), use_container_width=True)
+
+            # --- Cross-correlation scatter ---
+            st.markdown("### Microlensing vs Accretion Score")
+            scatter_df = pd.DataFrame({
+                "Microlensing Score": microlensing_scores,
+                "Accretion Score": accretion_scores,
+                "Category": categories,
+            })
+            fig = px.scatter(
+                scatter_df,
+                x="Microlensing Score",
+                y="Accretion Score",
+                color="Category",
+                opacity=0.5,
+                height=500,
+                title="Microlensing vs Accretion Score (colored by anomaly category)",
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            # --- Spectrum detail with template overlay ---
+            st.markdown("### Spectrum Detail with Subclass Template")
+            pbh_inspect_options = ["Microlensing", "Accretion"]
+            pbh_inspect_type = st.radio("Inspect from", pbh_inspect_options, horizontal=True)
+            if pbh_inspect_type == "Microlensing":
+                inspect_order = ml_order
+                inspect_scores = microlensing_scores
+                score_label = "Microlensing Score"
+            else:
+                inspect_order = acc_order
+                inspect_scores = accretion_scores
+                score_label = "Accretion Score"
+
+            inspect_rank = st.slider("Select rank", 1, min(100, len(inspect_order)), 1, key="pbh_rank")
+            pbh_idx = int(inspect_order[inspect_rank - 1])
+            pbh_meta = metadata.iloc[pbh_idx]
+            pbh_spectrum = get_display_spectrum(spectra, pbh_meta, pbh_idx)
+
+            # Build subclass population median template
+            broad_class = str(pbh_meta.get("subclass", ""))[:1].upper()
+            same_class_mask = metadata["subclass"].str[:1].str.upper() == broad_class
+            template_spectrum = None
+            if spectra is not None and same_class_mask.sum() >= 5:
+                template_spectrum = np.median(spectra[same_class_mask], axis=0)
+
+            fig = go.Figure()
+            if template_spectrum is not None:
+                fig.add_trace(go.Scatter(
+                    x=wl, y=template_spectrum, mode="lines",
+                    name=f"{broad_class}-class median",
+                    line=dict(color="rgba(160,170,185,0.6)", width=1.5, dash="dash"),
+                ))
+            fig.add_trace(go.Scatter(
+                x=wl, y=pbh_spectrum, mode="lines",
+                name="Observed",
+                line=dict(color="#ff6b35", width=2),
+            ))
+            for name, wavelength in DISPLAY_LINES:
+                fig.add_vline(x=wavelength, line_dash="dot", line_color="rgba(255,255,255,0.15)")
+            fig.update_layout(
+                title=f"Rank #{inspect_rank}: {pbh_meta.get('filename', pbh_idx)} "
+                      f"({score_label}: {inspect_scores[pbh_idx]:.3f})",
+                xaxis_title="Wavelength (Angstroms)",
+                yaxis_title="Normalized Flux",
+                height=400,
+                legend=dict(orientation="h"),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("Microlensing", f"{microlensing_scores[pbh_idx]:.4f}")
+            mc2.metric("Accretion", f"{accretion_scores[pbh_idx]:.4f}")
+            mc3.metric("IF Score", f"{if_scores[pbh_idx]:.4f}")
+            mc4.metric("AE Score", f"{ae_scores[pbh_idx]:.4f}")
+            if pbh_categories is not None:
+                st.info(f"PBH category: **{pbh_categories[pbh_idx]}**")
 
 
 if __name__ == "__main__":
