@@ -4,6 +4,10 @@
 
 Added physics-motivated feature extractors for primordial black hole (PBH) candidate screening. These are exploratory screens for follow-up, not confirmations — many mundane astrophysical phenomena produce similar spectral features.
 
+### Scripts
+
+- **`scripts/rescore_pbh.py`** — Rescore PBH features on existing spectra without rerunning the full pipeline. Use after a pipeline run completes to apply updated scoring code (e.g. accretion continuum floor fix). Run with `uv run python scripts/rescore_pbh.py`.
+
 ### New Modules
 
 - **`src/features/spectral_lines.py`** — Shared line measurement utilities (flux, continuum, equivalent width, line profile asymmetry) for 7 stellar absorption lines (Ca K, Ca H, H-gamma, H-beta, Mg b, Na D, H-alpha)
