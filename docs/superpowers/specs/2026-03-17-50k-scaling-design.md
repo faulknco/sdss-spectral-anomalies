@@ -28,18 +28,24 @@ Stream-and-discard: download FITS in batches of 500 with 8 parallel workers, pre
 `stream_and_preprocess(metadata_df, processed_dir, batch_size=500, n_workers=8, target_grid=DEFAULT_GRID)`
 
 Flow:
-1. Split metadata into batches of `batch_size`
-2. For each batch: download FITS files in parallel (8 concurrent workers via `concurrent.futures.ThreadPoolExecutor`), preprocess each into resampled+normalized flux, extract metadata dict, delete the FITS file
-3. Append preprocessed rows to a growing memory-mapped numpy file
-4. Return total count of successfully processed spectra
+1. Pre-allocate a memory-mapped numpy file at `(n_total, grid_size)` filled with zeros. `n_total` is `len(metadata_df)`. Rows for failed downloads remain zero and are compacted out at the end.
+2. Split metadata into batches of `batch_size`
+3. For each batch: download FITS files in parallel using a new `ThreadPoolExecutor` (written from scratch -- the existing `download_spectra` is serial). Each worker calls the existing `fetch_spectrum_file` for a single FITS, preprocesses it, returns the result. The manifest is NOT updated per-thread -- instead, a single manifest write happens per batch after all workers complete, avoiding thread-safety issues with `_write_manifest`.
+4. Write preprocessed rows to the memmap at the current offset, delete the batch's FITS files
+5. After all batches: truncate the memmap to actual successful count (copy to a new file of the right size, delete the oversized original). Save final metadata parquet.
+6. Return total count of successfully processed spectra
+
+**Failure handling:** Failed downloads are logged and skipped. If >10% of downloads fail within a single batch, log a warning. If >20% of total downloads fail, abort the pipeline with an error. Zero-rows from failed downloads are compacted out during the final truncation step, so no poisoned rows reach the models.
+
+**Checkpoint/resume:** Each batch writes a small `streaming_checkpoint.json` with `{batch_index, offset, n_success, n_fail}`. If the pipeline crashes and restarts, it reads the checkpoint and resumes from the last completed batch. The memmap file already has the earlier batches written.
 
 Temporary FITS files live in `data/raw_tmp/`, cleaned after each batch. The permanent `data/raw/` directory (existing 599 files) is untouched.
 
 ### New function in `src/data/preprocess.py`
 
-`preprocess_to_memmap(wavelengths, fluxes, target_grid, output_path, offset=0)`
+`preprocess_to_memmap(wavelengths, fluxes, target_grid, output_path, offset, total_rows)`
 
-Writes preprocessed spectra to a memory-mapped numpy file, starting at row `offset`. Called per-batch, appending rows. Creates the file on first call, extends on subsequent calls.
+Writes preprocessed spectra to a pre-allocated memory-mapped numpy file, starting at row `offset`. On first call (`offset=0`), creates the file with shape `(total_rows, len(target_grid))`. On subsequent calls, opens in `r+` mode and writes at the given offset. Does not resize the file -- caller is responsible for final truncation if needed.
 
 ### Backward Compatibility
 
@@ -91,9 +97,9 @@ After scoring and comparison:
 
 Minimal. Two changes:
 
-1. **`load_or_fetch_processed_spectrum`** in `src/data/preprocess.py` -- check `data/raw_kept/` before `data/raw/` before attempting remote fetch. One extra path check.
+1. **`load_or_fetch_processed_spectrum`** in `src/data/preprocess.py` -- add an optional `kept_dir` parameter (default `None`). When provided, check `kept_dir` before `raw_dir` before attempting remote fetch. The caller (dashboard) passes both directories. This preserves the existing function signature for backward compatibility.
 
-2. **`load_data()`** in `src/dashboard/app.py` -- when `spectra.npy` exists and is large (>10K rows), load with `mmap_mode='r'` instead of fully into RAM. Individual spectrum lookups stay fast without loading 1.4 GB into the Streamlit cache.
+2. **Spectra loading** in `src/dashboard/app.py` -- move the spectra load out of the `@st.cache_data`-decorated `load_data()` function. Instead, use a separate `@st.cache_resource` function that returns the memmap by reference (avoiding serialization which would fully materialize the array into RAM). When `spectra.npy` is small (<10K rows), load normally. When large, load with `mmap_mode='r'`.
 
 Everything else works as-is. Score arrays, metadata, and comparison data are all small.
 
@@ -129,6 +135,10 @@ No integration test changes -- the integration test uses 100 synthetic spectra b
 ## Notes
 
 - Streaming mode does not affect the existing 599-file workflow. Running without `--streaming` and with `--download-mode skip` behaves exactly as before.
-- The `data/raw_tmp/` directory is created and cleaned automatically. It should be in `.gitignore`.
+- Both `data/raw_tmp/` and `data/raw_kept/` must be added to `.gitignore`.
 - At 50K spectra, the conditional flow (MAF) trains on PCA components (50K x 50 = 20 MB), well within RAM.
 - The DAGMM and CVAE use DataLoaders with batching and scale linearly.
+- OC-SVM scoring time at 50K: `decision_function` is O(n_test * n_sv * n_features). With ~1.5K support vectors and 50 PCA features, scoring 50K spectra takes ~1-2 minutes. Included in the 30-45 min training time estimate.
+- Spectra are stored as float32 (not float64) in the memmap, halving disk usage to ~650 MB for 50K spectra with negligible precision loss for normalized flux values.
+- Step 9 re-download of top 200 FITS reuses the existing `download_spectra()` function with a filtered metadata DataFrame.
+- The SDSS query uses `ORDER BY NEWID()` which is non-deterministic. Two runs at 50K will produce different spectra sets. This is acceptable for anomaly detection but should be noted if exact reproducibility is needed.
