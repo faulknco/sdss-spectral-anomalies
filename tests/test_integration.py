@@ -14,8 +14,10 @@ from src.models.conformal import SplitConformalCalibrator
 from src.data.preprocess import build_metadata_features
 from src.features.microlensing import microlensing_score
 from src.features.accretion import accretion_score
+from src.features.line_asymmetry import line_asymmetry_score
 from src.features.multiepoch import multiepoch_variability_scores, assign_multiepoch_scores
 from src.features.gaia_crossmatch import score_astrometric_anomalies, _empty_result
+from src.features.photometric_crossmatch import compute_dereddened_colors, score_color_anomalies, _empty_photometry
 from src.features.line_windows import compute_derivative_spectra, extract_line_features
 from src.models.cvae import train_cvae
 from src.models.conditional_flow import train_conditional_flow
@@ -147,6 +149,10 @@ def test_full_pipeline_synthetic():
     assert acc_scores.shape == (n_spectra,)
     assert np.all(acc_scores >= 0)
 
+    asym_scores = line_asymmetry_score(spectra, wl_grid, meta_df)
+    assert asym_scores.shape == (n_spectra,)
+    assert np.all(asym_scores >= 0)
+
     pbh_cats = categorize_pbh_candidates(ml_scores, acc_scores)
     assert len(pbh_cats) == n_spectra
     valid_pbh = {"microlensing_candidate", "accretion_candidate", "both_candidate", "none"}
@@ -164,6 +170,10 @@ def test_full_pipeline_synthetic():
     # Gaia cross-match scoring (offline, just verify scoring logic)
     gaia_scored = score_astrometric_anomalies(_empty_result())
     assert "astrometric_anomaly_score" in gaia_scored.columns
+
+    # Photometric cross-match scoring (offline, just verify scoring logic)
+    phot_scored = score_color_anomalies(_empty_photometry(), meta_df)
+    assert "color_anomaly_score" in phot_scored.columns
 
     # Line-window preprocessing
     derivative = compute_derivative_spectra(spectra, target_grid)

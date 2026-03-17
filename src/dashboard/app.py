@@ -340,7 +340,7 @@ def main():
      cond_ae_scores, cond_ae_pvalues, cond_ae_calibration_mask, comparison_config,
      focused_review, microlensing_scores, accretion_scores, pbh_categories,
      cvae_scores, cvae_pvalues, flow_scores, flow_pvalues, eval_results,
-     multiepoch_df, multiepoch_scores, gaia_df) = load_data()
+     multiepoch_df, multiepoch_scores, gaia_df, line_asymmetry_scores, phot_df) = load_data()
 
     labels_path = RESULTS_DIR / "review_labels.parquet"
     if "review_labels" not in st.session_state:

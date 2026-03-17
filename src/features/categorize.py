@@ -40,3 +40,36 @@ def categorize_anomalies(
             categories.append("normal")
 
     return categories
+
+
+def categorize_pbh_candidates(
+    microlensing_scores: np.ndarray,
+    accretion_scores: np.ndarray,
+    microlensing_threshold_pct: float = 95,
+    accretion_threshold_pct: float = 95,
+) -> list[str]:
+    """Classify each spectrum as a PBH candidate based on physics-motivated scores.
+
+    Categories:
+        - microlensing_candidate: high microlensing score only
+        - accretion_candidate: high accretion score only
+        - both_candidate: high in both scores
+        - none: below threshold in both
+    """
+    ml_thresh = np.percentile(microlensing_scores, microlensing_threshold_pct)
+    acc_thresh = np.percentile(accretion_scores, accretion_threshold_pct)
+
+    categories = []
+    for ml, acc in zip(microlensing_scores, accretion_scores):
+        ml_flag = ml > ml_thresh
+        acc_flag = acc > acc_thresh
+        if ml_flag and acc_flag:
+            categories.append("both_candidate")
+        elif ml_flag:
+            categories.append("microlensing_candidate")
+        elif acc_flag:
+            categories.append("accretion_candidate")
+        else:
+            categories.append("none")
+
+    return categories
