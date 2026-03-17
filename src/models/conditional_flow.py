@@ -64,6 +64,7 @@ class ConditionalMAF(nn.Module):
         z = x
         for block, bn in zip(self.blocks, self.batch_norms):
             mu, log_s = block(z, context)
+            log_s = torch.clamp(log_s, -5.0, 5.0)
             z = (z - mu) * torch.exp(-log_s)
             log_det_sum -= log_s.sum(dim=1)
             z = bn(z)
