@@ -212,3 +212,18 @@ def build_metadata_features(metadata_df, stats: dict | None = None, return_stats
     if return_stats:
         return features, stats
     return features
+
+
+def create_memmap(output_path: Path, total_rows: int, n_cols: int) -> None:
+    """Create a .npy file pre-filled with zeros, compatible with np.load(mmap_mode='r+')."""
+    arr = np.zeros((total_rows, n_cols), dtype=np.float32)
+    np.save(output_path, arr)
+
+
+def write_to_memmap(
+    output_path: Path, data: np.ndarray, offset: int, total_rows: int, n_cols: int
+) -> None:
+    """Write rows into an existing .npy memmap file at the given offset."""
+    fp = np.load(output_path, mmap_mode="r+")
+    fp[offset : offset + len(data)] = data.astype(np.float32)
+    fp.flush()

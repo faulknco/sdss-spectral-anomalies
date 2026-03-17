@@ -166,3 +166,26 @@ def test_load_or_fetch_processed_spectrum_uses_existing_file(monkeypatch, tmp_pa
     row = pd.Series({"plate": 1, "mjd": 50000, "fiberid": 1})
     spectrum = load_or_fetch_processed_spectrum(row, tmp_path)
     np.testing.assert_allclose(spectrum, expected / np.median(expected))
+
+
+def test_create_and_write_memmap(tmp_path):
+    from src.data.preprocess import create_memmap, write_to_memmap, preprocess_spectra
+    rng = np.random.default_rng(42)
+    n, n_wl = 20, 500
+    wavelengths = [np.linspace(3800, 9200, n_wl) for _ in range(n)]
+    fluxes = [rng.normal(10, 1, n_wl) for _ in range(n)]
+    target_grid = np.linspace(3800, 9200, n_wl)
+
+    output_path = tmp_path / "spectra.npy"
+    create_memmap(output_path, total_rows=n, n_cols=n_wl)
+    batch1 = preprocess_spectra(wavelengths[:10], fluxes[:10], target_grid).astype(np.float32)
+    write_to_memmap(output_path, batch1, offset=0, total_rows=n, n_cols=n_wl)
+    batch2 = preprocess_spectra(wavelengths[10:], fluxes[10:], target_grid).astype(np.float32)
+    write_to_memmap(output_path, batch2, offset=10, total_rows=n, n_cols=n_wl)
+
+    result = np.load(output_path, mmap_mode="r")
+    assert result.shape == (20, 500)
+    assert result.dtype == np.float32
+
+    expected = preprocess_spectra(wavelengths, fluxes, target_grid).astype(np.float32)
+    np.testing.assert_allclose(result, expected, atol=1e-6)
