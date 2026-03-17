@@ -170,9 +170,10 @@ Read `src/dashboard/app.py` to understand the Tab 6 (Focused Review) structure.
 
 - [ ] **Step 2: Add import and session state initialization**
 
-Add import after existing imports:
+Add imports after existing imports:
 
 ```python
+from datetime import datetime, timezone
 from src.features.review_labels import LABEL_CODES, LABEL_DISPLAY_NAMES, load_labels, save_labels
 ```
 
@@ -233,7 +234,7 @@ At the top of the `with tab6:` block, before the existing subheader, add:
 
 - [ ] **Step 5: Add label selectbox and notes input to candidate inspector**
 
-Inside Tab 6, after the existing neighbor spectra display and before the RA/Dec markdown, add:
+Inside Tab 6, AFTER the `if neighbor_idx:` block ends and AFTER the RA/Dec markdown line, add the labeling controls at the same indentation level as the RA/Dec markdown (NOT inside the neighbor_idx conditional):
 
 ```python
             # --- Labeling controls ---
@@ -261,17 +262,18 @@ Inside Tab 6, after the existing neighbor spectra display and before the RA/Dec 
                 key=f"notes_{candidate_filename}",
             )
 
-            from datetime import datetime, timezone
+            # Only update session state if the label or notes actually changed
             if selected_display == "(unlabeled)":
                 if candidate_filename in review_labels:
                     del st.session_state["review_labels"][candidate_filename]
             else:
                 selected_code = code_for_display[selected_display]
-                st.session_state["review_labels"][candidate_filename] = {
-                    "label": selected_code,
-                    "notes": notes,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                }
+                if selected_code != current.get("label") or notes != current.get("notes", ""):
+                    st.session_state["review_labels"][candidate_filename] = {
+                        "label": selected_code,
+                        "notes": notes,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
 ```
 
 - [ ] **Step 6: Run all tests**
@@ -313,14 +315,23 @@ After the line `focused_review.to_parquet(RESULTS_DIR / "focused_review.parquet"
         focused_review.to_parquet(RESULTS_DIR / "focused_review.parquet")
 ```
 
-- [ ] **Step 3: Run tests**
+- [ ] **Step 3: Add gitignore exception for review_labels.parquet**
+
+The `data/results/` directory is in `.gitignore`, but `review_labels.parquet` contains human-generated labels that cannot be regenerated. Add an exception to `.gitignore`:
+
+```
+# Keep human review labels (not auto-generated)
+!data/results/review_labels.parquet
+```
+
+- [ ] **Step 4: Run tests**
 
 Run: `cd /Users/faulknco/Projects/sdss-spectral-anomalies && uv run pytest tests/ -v --ignore=tests/test_integration.py -x`
 Expected: All PASS
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/run_pipeline.py
+git add src/run_pipeline.py .gitignore
 git commit -m "feat: merge existing review labels into focused_review on pipeline re-run"
 ```
