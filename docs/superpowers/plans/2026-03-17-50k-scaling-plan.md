@@ -14,7 +14,7 @@
 
 ## Chunk 1: Memmap Preprocessing and OC-SVM Subsampling
 
-### Task 1: Preprocess to Memmap
+### Task 1: create_memmap and write_to_memmap helpers
 
 **Files:**
 - Modify: `src/data/preprocess.py`
@@ -25,8 +25,8 @@
 Append to `tests/test_preprocess.py`:
 
 ```python
-def test_preprocess_to_memmap_shape(tmp_path):
-    from src.data.preprocess import preprocess_to_memmap, preprocess_spectra
+def test_create_and_write_memmap(tmp_path):
+    from src.data.preprocess import create_memmap, write_to_memmap, preprocess_spectra
     rng = np.random.default_rng(42)
     n, n_wl = 20, 500
     wavelengths = [np.linspace(3800, 9200, n_wl) for _ in range(n)]
@@ -34,67 +34,46 @@ def test_preprocess_to_memmap_shape(tmp_path):
     target_grid = np.linspace(3800, 9200, n_wl)
 
     output_path = tmp_path / "spectra.npy"
+    # Create the file
+    create_memmap(output_path, total_rows=n, n_cols=n_wl)
     # Write first batch (rows 0-9)
-    preprocess_to_memmap(wavelengths[:10], fluxes[:10], target_grid, output_path, offset=0, total_rows=n)
+    batch1 = preprocess_spectra(wavelengths[:10], fluxes[:10], target_grid).astype(np.float32)
+    write_to_memmap(output_path, batch1, offset=0, total_rows=n, n_cols=n_wl)
     # Write second batch (rows 10-19)
-    preprocess_to_memmap(wavelengths[10:], fluxes[10:], target_grid, output_path, offset=10, total_rows=n)
+    batch2 = preprocess_spectra(wavelengths[10:], fluxes[10:], target_grid).astype(np.float32)
+    write_to_memmap(output_path, batch2, offset=10, total_rows=n, n_cols=n_wl)
 
     result = np.load(output_path, mmap_mode="r")
     assert result.shape == (20, 500)
     assert result.dtype == np.float32
 
-    # Values should match regular preprocess
     expected = preprocess_spectra(wavelengths, fluxes, target_grid).astype(np.float32)
     np.testing.assert_allclose(result, expected, atol=1e-6)
-
-
-def test_preprocess_to_memmap_creates_file(tmp_path):
-    from src.data.preprocess import preprocess_to_memmap
-    output_path = tmp_path / "spectra.npy"
-    wl = [np.linspace(3800, 9200, 100)]
-    fl = [np.ones(100)]
-    grid = np.linspace(3800, 9200, 100)
-    preprocess_to_memmap(wl, fl, grid, output_path, offset=0, total_rows=1)
-    assert output_path.exists()
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/faulknco/Projects/sdss-spectral-anomalies && uv run pytest tests/test_preprocess.py::test_preprocess_to_memmap_shape -v`
+Run: `cd /Users/faulknco/Projects/sdss-spectral-anomalies && uv run pytest tests/test_preprocess.py::test_create_and_write_memmap -v`
 Expected: FAIL with ImportError
 
-- [ ] **Step 3: Implement preprocess_to_memmap**
+- [ ] **Step 3: Implement helpers**
 
 Append to `src/data/preprocess.py`:
 
 ```python
-def preprocess_to_memmap(
-    wavelengths: list[np.ndarray],
-    fluxes: list[np.ndarray],
-    target_grid: np.ndarray,
-    output_path: Path,
-    offset: int,
-    total_rows: int,
-) -> int:
-    """Write preprocessed spectra to a memory-mapped numpy file.
+def create_memmap(output_path: Path, total_rows: int, n_cols: int) -> None:
+    """Create a .npy file pre-filled with zeros, compatible with np.load(mmap_mode='r+')."""
+    arr = np.zeros((total_rows, n_cols), dtype=np.float32)
+    np.save(output_path, arr)
 
-    On first call (offset=0), creates the file with shape (total_rows, len(target_grid))
-    in float32. On subsequent calls, opens in r+ mode and writes at the given offset.
 
-    Returns the number of rows written.
-    """
-    n_cols = len(target_grid)
-    if offset == 0:
-        fp = np.memmap(output_path, dtype=np.float32, mode="w+", shape=(total_rows, n_cols))
-    else:
-        fp = np.memmap(output_path, dtype=np.float32, mode="r+", shape=(total_rows, n_cols))
-
-    processed = preprocess_spectra(wavelengths, fluxes, target_grid)
-    n_rows = len(processed)
-    fp[offset : offset + n_rows] = processed.astype(np.float32)
+def write_to_memmap(
+    output_path: Path, data: np.ndarray, offset: int, total_rows: int, n_cols: int
+) -> None:
+    """Write rows into an existing .npy memmap file at the given offset."""
+    fp = np.load(output_path, mmap_mode="r+")
+    fp[offset : offset + len(data)] = data.astype(np.float32)
     fp.flush()
-    del fp
-    return n_rows
 ```
 
 - [ ] **Step 4: Run tests**
@@ -106,7 +85,7 @@ Expected: All PASS
 
 ```bash
 git add src/data/preprocess.py tests/test_preprocess.py
-git commit -m "feat: add preprocess_to_memmap for incremental float32 memmap writing"
+git commit -m "feat: add create_memmap and write_to_memmap for incremental .npy writing"
 ```
 
 ---
@@ -257,7 +236,7 @@ def test_stream_and_preprocess_basic(tmp_path):
         return path
 
     target_grid = np.linspace(3800, 9200, 200)
-    with patch("src.data.download.fetch_spectrum_file", side_effect=mock_fetch):
+    with patch("src.data.download._download_spectrum_file", side_effect=lambda plate, mjd, fiberid, output_dir, **kw: (mock_fetch(plate, mjd, fiberid, output_dir), "ok", 1, None)):
         n_success = stream_and_preprocess(
             metadata, processed_dir, raw_tmp_dir=raw_tmp,
             batch_size=2, n_workers=1, target_grid=target_grid,
@@ -300,7 +279,7 @@ def test_stream_and_preprocess_cleans_temp_files(tmp_path):
         return path
 
     target_grid = np.linspace(3800, 9200, 100)
-    with patch("src.data.download.fetch_spectrum_file", side_effect=mock_fetch):
+    with patch("src.data.download._download_spectrum_file", side_effect=lambda plate, mjd, fiberid, output_dir, **kw: (mock_fetch(plate, mjd, fiberid, output_dir), "ok", 1, None)):
         stream_and_preprocess(
             metadata, processed_dir, raw_tmp_dir=raw_tmp,
             batch_size=1, n_workers=1, target_grid=target_grid,
@@ -318,7 +297,9 @@ Expected: FAIL with ImportError
 
 - [ ] **Step 3: Implement stream_and_preprocess**
 
-Add to `src/data/download.py` (after existing imports, add `import json`, `import shutil`, `from concurrent.futures import ThreadPoolExecutor, as_completed`). Then append:
+Add to `src/data/download.py`:
+- At top of file, add: `import json` and `from concurrent.futures import ThreadPoolExecutor, as_completed`
+- Then append these functions:
 
 ```python
 def _fetch_and_preprocess_one(
@@ -329,18 +310,24 @@ def _fetch_and_preprocess_one(
     max_retries: int = DEFAULT_MAX_RETRIES,
     transport: str = "auto",
 ) -> tuple[dict | None, np.ndarray | None]:
-    """Download one FITS, preprocess it, return (metadata_dict, flux_array) or (None, None)."""
+    """Download one FITS, preprocess it, return (metadata_dict, flux_array) or (None, None).
+
+    Uses _download_spectrum_file directly (not fetch_spectrum_file) to avoid
+    thread-unsafe manifest writes.
+    """
     from src.data.preprocess import resample_spectrum, normalize_spectrum, _make_metadata_dict
 
     plate, mjd, fiberid = int(row["plate"]), int(row["mjd"]), int(row["fiberid"])
     run2d = row.get("run2d")
 
-    path = fetch_spectrum_file(
-        plate, mjd, fiberid, raw_tmp_dir,
+    # Use _download_spectrum_file directly to avoid manifest thread-safety issues
+    path, status, attempts, error = _download_spectrum_file(
+        plate=plate, mjd=mjd, fiberid=fiberid,
+        output_dir=raw_tmp_dir,
         run2d=run2d, timeout=timeout, max_retries=max_retries,
-        transport=transport, cache=False,
+        cache=False, transport=transport,
     )
-    if path is None:
+    if status == "failed" or path is None:
         return None, None
 
     try:
@@ -372,12 +359,11 @@ def _fetch_and_preprocess_one(
                 logg=_sf(meta_ext, "ELODIE_LOGG"),
                 feh=_sf(meta_ext, "ELODIE_FEH"),
             )
-        # Delete the FITS file immediately
         path.unlink(missing_ok=True)
         return meta, flux
     except Exception as e:
         logger.warning("Failed to process %s: %s", build_sdss_filename(plate, mjd, fiberid), e)
-        if path.exists():
+        if path is not None and path.exists():
             path.unlink(missing_ok=True)
         return None, None
 
@@ -400,7 +386,7 @@ def stream_and_preprocess(
 
     Returns the number of successfully processed spectra.
     """
-    from src.data.preprocess import DEFAULT_GRID, preprocess_to_memmap
+    from src.data.preprocess import DEFAULT_GRID, create_memmap, write_to_memmap
 
     if target_grid is None:
         target_grid = DEFAULT_GRID
@@ -436,10 +422,9 @@ def stream_and_preprocess(
         logger.info("Resuming from batch %d (offset=%d, success=%d, fail=%d)",
                      start_batch, offset, total_success, total_fail)
 
-    # Pre-allocate memmap on first run
-    if not memmap_path.exists() or start_batch == 0:
-        fp = np.memmap(memmap_path, dtype=np.float32, mode="w+", shape=(n_total, grid_size))
-        del fp
+    # Pre-allocate .npy file on first run (always recreate when starting fresh)
+    if start_batch == 0:
+        create_memmap(memmap_path, total_rows=n_total, n_cols=grid_size)
 
     batches = [
         metadata_df.iloc[i : i + batch_size]
@@ -469,12 +454,8 @@ def stream_and_preprocess(
 
         # Write successful spectra to memmap
         if batch_success:
-            wavelengths = [np.zeros(0)] * len(batch_success)  # unused by memmap writer
             fluxes_arr = np.array([flux for _, flux in batch_success], dtype=np.float32)
-            fp = np.memmap(memmap_path, dtype=np.float32, mode="r+", shape=(n_total, grid_size))
-            fp[offset : offset + len(batch_success)] = fluxes_arr
-            fp.flush()
-            del fp
+            write_to_memmap(memmap_path, fluxes_arr, offset=offset, total_rows=n_total, n_cols=grid_size)
             all_metadata.extend([meta for meta, _ in batch_success])
             offset += len(batch_success)
 
@@ -515,11 +496,11 @@ def stream_and_preprocess(
                      batch_idx + 1, len(batches), len(batch_success), batch_fail,
                      total_success, n_total)
 
-    # Compact memmap: truncate to actual success count
+    # Compact: truncate to actual success count
     if total_success < n_total:
-        fp = np.memmap(memmap_path, dtype=np.float32, mode="r", shape=(n_total, grid_size))
-        compacted = np.array(fp[:total_success])
-        del fp
+        full = np.load(memmap_path, mmap_mode="r")
+        compacted = np.array(full[:total_success])
+        del full
         np.save(memmap_path, compacted)
 
     # Save final metadata
