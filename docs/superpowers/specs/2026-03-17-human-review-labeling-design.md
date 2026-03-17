@@ -34,11 +34,15 @@ Short codes for programmatic use. The dashboard maps these to display names:
 
 **New file:** `src/features/review_labels.py`
 
-Two functions:
+Constants:
+- `LABEL_CODES` -- list of valid label codes: `["artifact", "low_sn", "plausible_oddity", "known_rare", "unclear"]`
+- `LABEL_DISPLAY_NAMES` -- dict mapping codes to display names (single authoritative source)
+
+Functions:
 - `load_labels(path) -> pd.DataFrame` -- reads parquet if it exists, returns empty DataFrame with the correct schema if not.
 - `save_labels(df, path)` -- writes DataFrame to parquet.
 
-This keeps I/O logic out of the dashboard and makes it testable.
+This keeps I/O logic and label vocabulary out of the dashboard and makes it testable.
 
 ## 2. Dashboard UI Changes
 
@@ -46,13 +50,13 @@ This keeps I/O logic out of the dashboard and makes it testable.
 
 ### Label State Management
 
-On dashboard load, `load_labels()` reads existing labels into `st.session_state["review_labels"]` (a dict mapping `filename -> {label, notes, timestamp}`). This avoids re-reading parquet on every Streamlit rerun.
+On dashboard load (outside `load_data()`, uncached), `load_labels()` reads existing labels into `st.session_state["review_labels"]` (a dict mapping `filename -> {label, notes, timestamp}`). This is called separately from the cached `load_data()` because labels change during a session and must not be cached.
 
 ### UI Additions to Candidate Inspector
 
 After the existing neighbor spectra and metadata display:
 
-1. **Label selectbox** -- options: `["(unlabeled)", "Artifact", "Low S/N", "Plausible Oddity", "Known Rare Subtype", "Unclear"]`. Pre-selects the current label if one exists.
+1. **Label selectbox** -- options built from `LABEL_DISPLAY_NAMES` with `"(unlabeled)"` prepended. Pre-selects the current label if one exists. Selecting `"(unlabeled)"` removes the label from session state (the candidate is treated as not yet reviewed).
 
 2. **Notes text input** -- single-line `st.text_input` pre-filled with existing notes.
 
@@ -74,6 +78,10 @@ One addition to `src/run_pipeline.py`: after `focused_review.parquet` is written
 labels_path = RESULTS_DIR / "review_labels.parquet"
 if labels_path.exists():
     labels_df = pd.read_parquet(labels_path)
+    # Drop any existing label columns to avoid _x/_y suffixes on re-runs
+    for col in labels_df.columns:
+        if col != "filename" and col in focused_review.columns:
+            focused_review = focused_review.drop(columns=[col])
     focused_review = focused_review.merge(labels_df, on="filename", how="left")
 ```
 
@@ -109,3 +117,8 @@ No Streamlit UI tests. No integration test changes (labels are human-in-the-loop
 | File | Location |
 |------|----------|
 | `review_labels.parquet` | `data/results/` |
+
+## Notes
+
+- **Version control:** `review_labels.parquet` contains human-generated labels that cannot be regenerated. It should NOT be in `.gitignore`. Consider committing it to preserve review work.
+- **`load_labels` is uncached:** Called separately from `@st.cache_data`-decorated `load_data()` to ensure label changes within a session are visible.
