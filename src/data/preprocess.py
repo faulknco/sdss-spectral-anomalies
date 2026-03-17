@@ -146,6 +146,7 @@ def load_or_fetch_processed_spectrum(
     metadata_row,
     raw_dir: Path,
     target_grid: np.ndarray = DEFAULT_GRID,
+    kept_dir: Path | None = None,
 ) -> np.ndarray:
     """Load a processed spectrum from local FITS, fetching the FITS on demand if needed."""
     from astropy.io import fits as astro_fits
@@ -158,8 +159,14 @@ def load_or_fetch_processed_spectrum(
 
     plate, mjd, fiberid, run2d = spectrum_identifiers_from_metadata(metadata_row)
     filename = build_sdss_filename(plate, mjd, fiberid)
-    fpath = raw_dir / filename
-    if not fpath.exists():
+
+    fpath = None
+    for search_dir in [kept_dir, raw_dir]:
+        if search_dir is not None and (search_dir / filename).exists():
+            fpath = search_dir / filename
+            break
+
+    if fpath is None:
         fetched = fetch_spectrum_file(plate, mjd, fiberid, raw_dir, run2d=run2d)
         if fetched is None:
             raise FileNotFoundError(f"Could not fetch {filename} from SDSS")
