@@ -45,3 +45,35 @@ def test_derivative_spectra_all_zero_handled():
     deriv = compute_derivative_spectra(spectra, wl)
     assert deriv.shape == (5, 499)
     assert np.all(np.isfinite(deriv))
+
+
+from src.features.line_windows import extract_line_features
+
+
+def test_extract_line_features_shape():
+    rng = np.random.default_rng(42)
+    spectra = rng.normal(1, 0.1, (50, 500))
+    wl = np.linspace(3800, 9200, 500)
+    features = extract_line_features(spectra, wl)
+    assert features.shape == (50, 44)
+    assert features.dtype == np.float32 or features.dtype == np.float64
+
+
+def test_extract_line_features_finite():
+    rng = np.random.default_rng(42)
+    spectra = rng.normal(1, 0.1, (20, 500))
+    wl = np.linspace(3800, 9200, 500)
+    features = extract_line_features(spectra, wl)
+    assert np.all(np.isfinite(features))
+
+
+def test_extract_line_features_detects_emission():
+    wl = np.linspace(3800, 9200, 500)
+    flat = np.ones((2, 500))
+    emission = flat.copy()
+    halpha_idx = np.argmin(np.abs(wl - 6562.8))
+    emission[1, halpha_idx - 2 : halpha_idx + 3] += 5.0
+    features = extract_line_features(emission, wl)
+    halpha_features_flat = features[0, 24:28]
+    halpha_features_emission = features[1, 24:28]
+    assert np.max(np.abs(halpha_features_emission - halpha_features_flat)) > 0.1
