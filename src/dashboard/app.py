@@ -19,6 +19,8 @@ from src.data.preprocess import DEFAULT_GRID, load_or_fetch_processed_spectrum
 from src.data.preprocess import build_metadata_features, METADATA_FEATURE_COLS
 from src.features.color import spectrum_to_rgb, rgb_to_hex
 from src.features.line_windows import DISPLAY_LINES
+from datetime import datetime, timezone
+from src.features.review_labels import LABEL_CODES, LABEL_DISPLAY_NAMES, load_labels, save_labels
 
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 RAW_DIR = PROJECT_ROOT / "data" / "raw"
@@ -74,6 +76,8 @@ def load_data():
     microlensing_scores = np.load(ml_scores_path) if ml_scores_path.exists() else None
     accretion_scores = np.load(acc_scores_path) if acc_scores_path.exists() else None
     pbh_categories = list(np.load(pbh_categories_path)) if pbh_categories_path.exists() else None
+    asym_scores_path = RESULTS_DIR / "line_asymmetry_scores.npy"
+    line_asymmetry_scores = np.load(asym_scores_path) if asym_scores_path.exists() else None
 
     cvae_scores_path = RESULTS_DIR / "cvae_scores.npy"
     cvae_pvalues_path = RESULTS_DIR / "cvae_pvalues.npy"
@@ -96,6 +100,8 @@ def load_data():
     multiepoch_df = pd.read_parquet(multiepoch_path) if multiepoch_path.exists() else pd.DataFrame()
     multiepoch_scores = np.load(multiepoch_scores_path) if multiepoch_scores_path.exists() else None
     gaia_df = pd.read_parquet(gaia_path) if gaia_path.exists() else pd.DataFrame()
+    phot_path = RESULTS_DIR / "photometric_crossmatch.parquet"
+    phot_df = pd.read_parquet(phot_path) if phot_path.exists() else pd.DataFrame()
 
     return (spectra, metadata, comparison, pca_components,
             if_scores, ae_scores, ocsvm_scores, dagmm_scores,
@@ -103,7 +109,7 @@ def load_data():
             cond_ae_scores, cond_ae_pvalues, cond_ae_calibration_mask, comparison_config,
             focused_review, microlensing_scores, accretion_scores, pbh_categories,
             cvae_scores, cvae_pvalues, flow_scores, flow_pvalues, eval_results,
-            multiepoch_df, multiepoch_scores, gaia_df)
+            multiepoch_df, multiepoch_scores, gaia_df, line_asymmetry_scores, phot_df)
 
 
 @st.cache_data(show_spinner=False)
@@ -336,12 +342,30 @@ def main():
      cvae_scores, cvae_pvalues, flow_scores, flow_pvalues, eval_results,
      multiepoch_df, multiepoch_scores, gaia_df) = load_data()
 
+    labels_path = RESULTS_DIR / "review_labels.parquet"
+    if "review_labels" not in st.session_state:
+        labels_df = load_labels(labels_path)
+        st.session_state["review_labels"] = {
+            row["filename"]: {"label": row["label"], "notes": row["notes"], "timestamp": row["timestamp"]}
+            for _, row in labels_df.iterrows()
+        }
+
     pbh_available = microlensing_scores is not None and accretion_scores is not None
 
     # Sidebar with parameter counts
     st.sidebar.header("Model Parameters")
     for model_name, count in param_counts.items():
         st.sidebar.metric(model_name, f"{count:,}")
+
+    st.sidebar.divider()
+    st.sidebar.header("Review Labels")
+    if st.sidebar.button("Save All Labels"):
+        rows = [{"filename": fn, **data} for fn, data in st.session_state.get("review_labels", {}).items()]
+        if rows:
+            save_labels(pd.DataFrame(rows), labels_path)
+            st.sidebar.success(f"Saved {len(rows)} labels")
+        else:
+            st.sidebar.info("No labels to save")
 
     tab_names = [
         "Anomaly Browser",
@@ -364,6 +388,8 @@ def main():
         sort_options = ["Combined", "Isolation Forest", "Autoencoder", "OC-SVM", "DAGMM", "Conditional AE", "CVAE", "Conditional Flow", "Conformal P-Value (most anomalous)"]
         if pbh_available:
             sort_options.extend(["Microlensing Score", "Accretion Score"])
+        if line_asymmetry_scores is not None:
+            sort_options.append("Line Asymmetry Score")
         sort_by = st.selectbox("Sort by", sort_options)
         top_n = st.slider("Show top N", 10, 500, 100)
 
@@ -387,6 +413,8 @@ def main():
             order = np.argsort(-microlensing_scores)
         elif sort_by == "Accretion Score" and pbh_available:
             order = np.argsort(-accretion_scores)
+        elif sort_by == "Line Asymmetry Score" and line_asymmetry_scores is not None:
+            order = np.argsort(-line_asymmetry_scores)
         else:  # Conformal P-Value (most anomalous)
             valid_idx = np.where(cond_ae_calibration_mask)[0]
             invalid_idx = np.where(~cond_ae_calibration_mask)[0]
@@ -572,6 +600,22 @@ def main():
 
     # --- Tab 6: Focused Review ---
     with tab6:
+        review_labels = st.session_state.get("review_labels", {})
+        if not focused_review.empty:
+            n_candidates = len(focused_review)
+            n_labeled = sum(1 for fn in focused_review["filename"] if fn in review_labels)
+            st.progress(n_labeled / max(n_candidates, 1))
+            label_counts = {}
+            for fn in focused_review["filename"]:
+                if fn in review_labels:
+                    lbl = review_labels[fn]["label"]
+                    label_counts[lbl] = label_counts.get(lbl, 0) + 1
+            summary_parts = [f"{n_labeled}/{n_candidates} labeled"]
+            for code in LABEL_CODES:
+                if code in label_counts:
+                    summary_parts.append(f"{label_counts[code]} {LABEL_DISPLAY_NAMES[code]}")
+            st.caption(" | ".join(summary_parts))
+
         st.subheader("Focused Review: Highest-Consensus Candidates")
         if focused_review.empty:
             st.info("No focused review file found yet. Rerun the pipeline to generate one.")
@@ -685,6 +729,25 @@ def main():
                 "Radius proxy assumes roughly one solar mass and is suppressed for white-dwarf-like subclasses. "
                 "Treat it as a visual cue, not a measured radius."
             )
+
+            st.divider()
+            st.subheader("Label This Candidate")
+            candidate_filename = candidate["filename"]
+            current = review_labels.get(candidate_filename, {})
+            current_label = current.get("label", "")
+            display_options = ["(unlabeled)"] + [LABEL_DISPLAY_NAMES[c] for c in LABEL_CODES]
+            code_for_display = {v: k for k, v in LABEL_DISPLAY_NAMES.items()}
+            current_display = LABEL_DISPLAY_NAMES.get(current_label, "(unlabeled)")
+            current_index = display_options.index(current_display) if current_display in display_options else 0
+            selected_display = st.selectbox("Classification", display_options, index=current_index, key=f"label_{candidate_filename}")
+            notes = st.text_input("Notes", value=current.get("notes", ""), key=f"notes_{candidate_filename}")
+            if selected_display == "(unlabeled)":
+                if candidate_filename in review_labels:
+                    del st.session_state["review_labels"][candidate_filename]
+            else:
+                selected_code = code_for_display[selected_display]
+                if selected_code != current.get("label") or notes != current.get("notes", ""):
+                    st.session_state["review_labels"][candidate_filename] = {"label": selected_code, "notes": notes, "timestamp": datetime.now(timezone.utc).isoformat()}
 
     # --- Tab 7: Evaluation ---
     with tab7:
@@ -843,13 +906,143 @@ def main():
             )
             st.plotly_chart(fig, use_container_width=True)
 
-            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1, mc2, mc3, mc4, mc5 = st.columns(5)
             mc1.metric("Microlensing", f"{microlensing_scores[pbh_idx]:.4f}")
             mc2.metric("Accretion", f"{accretion_scores[pbh_idx]:.4f}")
-            mc3.metric("IF Score", f"{if_scores[pbh_idx]:.4f}")
-            mc4.metric("AE Score", f"{ae_scores[pbh_idx]:.4f}")
+            mc3.metric("Line Asymmetry", f"{line_asymmetry_scores[pbh_idx]:.4f}" if line_asymmetry_scores is not None else "N/A")
+            mc4.metric("IF Score", f"{if_scores[pbh_idx]:.4f}")
+            mc5.metric("AE Score", f"{ae_scores[pbh_idx]:.4f}")
             if pbh_categories is not None:
                 st.info(f"PBH category: **{pbh_categories[pbh_idx]}**")
+
+            # --- Multi-epoch variability ---
+            st.markdown("---")
+            st.markdown("### Multi-Epoch Variability")
+            if not multiepoch_df.empty:
+                st.caption(
+                    f"Found {len(multiepoch_df)} multi-epoch groups from repeat SDSS observations. "
+                    "Achromatic (wavelength-independent) variability is consistent with "
+                    "gravitational microlensing, while chromatic variability suggests "
+                    "intrinsic stellar changes."
+                )
+                me_show_n = st.slider("Show top N groups", 5, min(50, len(multiepoch_df)), 10, key="me_top")
+                me_display = multiepoch_df.head(me_show_n).copy()
+                # Drop member_indices for display (it's a list)
+                me_cols = [c for c in me_display.columns if c != "member_indices"]
+                st.dataframe(me_display[me_cols].reset_index(drop=True), use_container_width=True)
+
+                if multiepoch_scores is not None and multiepoch_scores[pbh_idx] > 0:
+                    st.success(
+                        f"This candidate (idx {pbh_idx}) has multi-epoch data! "
+                        f"Variability score: {multiepoch_scores[pbh_idx]:.4f}"
+                    )
+                elif multiepoch_scores is not None:
+                    st.info("This candidate has no repeat observations in the dataset.")
+            else:
+                st.info("No multi-epoch groups found. Run the pipeline with more spectra to find repeat observations.")
+
+            # --- Gaia DR3 cross-match ---
+            st.markdown("### Gaia DR3 Astrometric Cross-Match")
+            if not gaia_df.empty:
+                st.caption(
+                    f"Matched {len(gaia_df)} PBH candidates to Gaia DR3. "
+                    "RUWE > 1.4 or high astrometric excess noise may indicate "
+                    "an unseen massive companion, but many mundane causes exist "
+                    "(binaries, crowded fields, extended sources)."
+                )
+                gaia_display_cols = [
+                    "sdss_idx", "separation_arcsec", "phot_g_mean_mag",
+                    "ruwe", "ruwe_flag", "astrometric_excess_noise",
+                    "astrometric_excess_noise_sig", "excess_noise_flag",
+                    "astrometric_anomaly_score", "parallax", "pmra", "pmdec",
+                ]
+                gaia_show = gaia_df[[c for c in gaia_display_cols if c in gaia_df.columns]]
+                st.dataframe(
+                    gaia_show.sort_values("astrometric_anomaly_score", ascending=False).reset_index(drop=True),
+                    use_container_width=True,
+                )
+
+                # Check if current candidate has Gaia match
+                candidate_gaia = gaia_df[gaia_df["sdss_idx"] == pbh_idx]
+                if len(candidate_gaia) > 0:
+                    g = candidate_gaia.iloc[0]
+                    gc1, gc2, gc3 = st.columns(3)
+                    gc1.metric("RUWE", f"{g.get('ruwe', np.nan):.2f}")
+                    gc2.metric("Excess Noise Sig", f"{g.get('astrometric_excess_noise_sig', np.nan):.1f}")
+                    gc3.metric("Astro Score", f"{g.get('astrometric_anomaly_score', 0):.2f}")
+                    if g.get("ruwe_flag", False):
+                        st.warning("RUWE > 1.4: astrometric solution is poor for a single star")
+                    if g.get("excess_noise_flag", False):
+                        st.warning("Significant astrometric excess noise detected")
+                else:
+                    st.info("No Gaia match found for this candidate.")
+            else:
+                st.info(
+                    "No Gaia cross-match data available. The pipeline queries Gaia DR3 "
+                    "for PBH candidates when online."
+                )
+
+            # --- SDSS Photometric Cross-Match ---
+            st.markdown("### SDSS Photometric Colors")
+            if not phot_df.empty and "u_g" in phot_df.columns:
+                st.caption(
+                    f"Matched {len(phot_df)} PBH candidates to SDSS ugriz photometry. "
+                    "Microlensing should produce normal colors (achromatic magnification). "
+                    "Accretion should show blue/UV excess (anomalous u-g)."
+                )
+
+                # Color-color diagram
+                phot_valid = phot_df[
+                    np.isfinite(phot_df["u_g"]) & np.isfinite(phot_df["g_r"])
+                ].copy()
+                if len(phot_valid) > 0:
+                    phot_valid["Blue Excess"] = phot_valid["blue_excess_flag"].map(
+                        {True: "Blue excess", False: "Normal"}
+                    )
+                    fig = px.scatter(
+                        phot_valid, x="g_r", y="u_g",
+                        color="Blue Excess",
+                        hover_data=["sdss_idx", "color_anomaly_score"],
+                        opacity=0.7, height=450,
+                        title="Color-Color Diagram (dereddened ugriz)",
+                        labels={"g_r": "g - r", "u_g": "u - g"},
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                phot_display_cols = [
+                    "sdss_idx", "u_g", "g_r", "r_i",
+                    "u_g_excess", "g_r_excess",
+                    "color_anomaly_score", "blue_excess_flag",
+                ]
+                phot_show = phot_df[[c for c in phot_display_cols if c in phot_df.columns]]
+                st.dataframe(
+                    phot_show.sort_values("color_anomaly_score", ascending=False).reset_index(drop=True),
+                    use_container_width=True,
+                )
+
+                # Check current candidate
+                candidate_phot = phot_df[phot_df["sdss_idx"] == pbh_idx]
+                if len(candidate_phot) > 0:
+                    cp = candidate_phot.iloc[0]
+                    pc1, pc2, pc3 = st.columns(3)
+                    pc1.metric("u - g", f"{cp.get('u_g', np.nan):.2f}")
+                    pc2.metric("g - r", f"{cp.get('g_r', np.nan):.2f}")
+                    pc3.metric("Color Score", f"{cp.get('color_anomaly_score', 0):.2f}")
+                    if cp.get("blue_excess_flag", False):
+                        st.warning("Blue excess detected: u-g significantly bluer than expected for spectral class")
+                    elif np.isfinite(cp.get("u_g_excess", np.nan)):
+                        excess = cp["u_g_excess"]
+                        if abs(excess) < 0.3:
+                            st.success("Colors consistent with spectral class (achromatic, consistent with microlensing)")
+                        else:
+                            st.info(f"u-g excess: {excess:+.2f} mag from class expectation")
+                else:
+                    st.info("No photometric match for this candidate.")
+            else:
+                st.info(
+                    "No photometric cross-match data available. The pipeline queries "
+                    "SDSS PhotoObj for PBH candidates when online."
+                )
 
 
 if __name__ == "__main__":
