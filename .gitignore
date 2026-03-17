@@ -7,4 +7,5 @@ __pycache__/
 *.egg-info/
 dist/
 .firecrawl/
-!data/results/review_labels.parquet
+data/raw_tmp/
+data/raw_kept/

@@ -7,24 +7,19 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.data.download import query_stellar_metadata, download_spectra
+from src.data.download import query_stellar_metadata, download_spectra, stream_and_preprocess
 from src.data.preprocess import load_and_preprocess, DEFAULT_GRID
 from src.models.classical import ClassicalAnomalyDetector
 from src.models.autoencoder import train_autoencoder
 from src.models.ocsvm import OCSVMDetector
 from src.models.dagmm import train_dagmm
 from src.models.stability import stability_run
-from src.features.categorize import categorize_anomalies, categorize_pbh_candidates
+from src.features.categorize import categorize_anomalies
 from src.models.compare import adaptive_top_n, compare_anomaly_scores, compare_n_models
 import json
 from src.models.conditional_autoencoder import train_conditional_autoencoder
 from src.models.conformal import SplitConformalCalibrator
 from src.data.preprocess import build_metadata_features, METADATA_FEATURE_COLS
-from src.features.line_windows import compute_derivative_spectra, extract_line_features
-from src.models.cvae import train_cvae
-from src.models.conditional_flow import train_conditional_flow
-from src.features.synthetic_anomalies import inject_anomalies
-from src.features.evaluate_retrieval import evaluate_retrieval
 from src.data.download import (
     DEFAULT_DOWNLOAD_TIMEOUT,
     DEFAULT_MAX_RETRIES,
@@ -57,7 +52,10 @@ def run(
     download_timeout: int = DEFAULT_DOWNLOAD_TIMEOUT,
     max_retries: int = DEFAULT_MAX_RETRIES,
     download_transport: str = "auto",
-    skip_pbh: bool = False,
+    streaming: bool = False,
+    batch_size: int = 500,
+    download_workers: int = 8,
+    keep_top_n: int = 200,
 ):
     """Run the full anomaly detection pipeline.
 
@@ -70,15 +68,45 @@ def run(
     if download_mode not in {"missing", "skip"}:
         raise ValueError("download_mode must be 'missing' or 'skip'")
 
-    # Step 1: Download
-    if download_mode == "skip":
+    use_streaming = streaming or (n_spectra > 1000 and download_mode != "skip")
+
+    if use_streaming and download_mode != "skip":
+        logger.info("=== Steps 1+2: Streaming download and preprocess ===")
+        metadata_df = query_stellar_metadata(limit=n_spectra, sn_min=sn_min, timeout=query_timeout)
+        metadata_df.to_parquet(PROCESSED_DIR / "metadata.parquet")
+        if metadata_only:
+            logger.info("Metadata-only mode; skipping downloads and training.")
+            return metadata_df
+        n_success = stream_and_preprocess(
+            metadata_df, PROCESSED_DIR,
+            batch_size=batch_size, n_workers=download_workers,
+            timeout=download_timeout, max_retries=max_retries,
+            transport=download_transport,
+        )
+        if n_success == 0:
+            raise RuntimeError("No spectra were successfully downloaded")
+        spectra = np.array(np.load(PROCESSED_DIR / "spectra.npy", mmap_mode="r"))
+        meta_list = pd.read_parquet(PROCESSED_DIR / "spectra_metadata.parquet").to_dict("records")
+        n_components = _effective_n_components(spectra, requested=50)
+    elif download_mode == "skip":
+        # Step 1: Download
         logger.info("=== Step 1: Skipping remote metadata/download; using local FITS only ===")
         metadata_path = PROCESSED_DIR / "metadata.parquet"
         if metadata_path.exists():
             metadata_df = pd.read_parquet(metadata_path)
         else:
             metadata_df = pd.DataFrame()
+
+        # Step 2: Preprocess
+        logger.info("=== Step 2: Preprocessing spectra ===")
+        spectra, meta_list = load_and_preprocess(RAW_DIR, DEFAULT_GRID)
+        if len(spectra) == 0:
+            raise RuntimeError("No local FITS spectra available to preprocess")
+        np.save(PROCESSED_DIR / "spectra.npy", spectra)
+        pd.DataFrame(meta_list).to_parquet(PROCESSED_DIR / "spectra_metadata.parquet")
+        n_components = _effective_n_components(spectra, requested=50)
     else:
+        # Step 1: Download
         logger.info("=== Step 1: Downloading spectra ===")
         metadata_df = query_stellar_metadata(limit=n_spectra, sn_min=sn_min, timeout=query_timeout)
         metadata_df.to_parquet(PROCESSED_DIR / "metadata.parquet")
@@ -93,14 +121,14 @@ def run(
             transport=download_transport,
         )
 
-    # Step 2: Preprocess
-    logger.info("=== Step 2: Preprocessing spectra ===")
-    spectra, meta_list = load_and_preprocess(RAW_DIR, DEFAULT_GRID)
-    if len(spectra) == 0:
-        raise RuntimeError("No local FITS spectra available to preprocess")
-    np.save(PROCESSED_DIR / "spectra.npy", spectra)
-    pd.DataFrame(meta_list).to_parquet(PROCESSED_DIR / "spectra_metadata.parquet")
-    n_components = _effective_n_components(spectra, requested=50)
+        # Step 2: Preprocess
+        logger.info("=== Step 2: Preprocessing spectra ===")
+        spectra, meta_list = load_and_preprocess(RAW_DIR, DEFAULT_GRID)
+        if len(spectra) == 0:
+            raise RuntimeError("No local FITS spectra available to preprocess")
+        np.save(PROCESSED_DIR / "spectra.npy", spectra)
+        pd.DataFrame(meta_list).to_parquet(PROCESSED_DIR / "spectra_metadata.parquet")
+        n_components = _effective_n_components(spectra, requested=50)
 
     # Step 3: Classical model
     logger.info("=== Step 3: Training PCA + Isolation Forest ===")
@@ -183,43 +211,6 @@ def run(
             "valid_for": "calibration_or_new_data",
         }, f, indent=2)
 
-    # Step 5d: Derivative spectra and line features
-    logger.info("=== Step 5d: Computing derivative spectra and line features ===")
-    derivative_spectra = compute_derivative_spectra(spectra, DEFAULT_GRID)
-    np.save(PROCESSED_DIR / "derivative_spectra.npy", derivative_spectra)
-    line_features = extract_line_features(spectra, DEFAULT_GRID)
-    np.save(PROCESSED_DIR / "line_features.npy", line_features)
-
-    # Step 5e: Conditional VAE
-    logger.info("=== Step 5e: Training Conditional VAE ===")
-    cvae_model, cvae_losses = train_cvae(
-        spectra[train_idx].astype(np.float32), meta_features[train_idx],
-        bottleneck_dim=64, epochs=50,
-    )
-    np.save(RESULTS_DIR / "cvae_losses.npy", np.array(cvae_losses))
-    cvae_scores = cvae_model.anomaly_score(spectra.astype(np.float32), meta_features)
-    np.save(RESULTS_DIR / "cvae_scores.npy", cvae_scores)
-
-    cvae_conformal = SplitConformalCalibrator()
-    cvae_conformal.fit(cvae_scores[cal_idx])
-    cvae_pvalues = cvae_conformal.pvalues(cvae_scores)
-    np.save(RESULTS_DIR / "cvae_pvalues.npy", cvae_pvalues)
-
-    # Step 5f: Conditional Normalizing Flow
-    logger.info("=== Step 5f: Training Conditional Normalizing Flow ===")
-    flow_model, flow_losses = train_conditional_flow(
-        pca_components[train_idx], meta_features[train_idx],
-        n_blocks=8, hidden_dim=128, epochs=100,
-    )
-    np.save(RESULTS_DIR / "flow_losses.npy", np.array(flow_losses))
-    flow_scores = flow_model.anomaly_score(pca_components, meta_features)
-    np.save(RESULTS_DIR / "flow_scores.npy", flow_scores)
-
-    flow_conformal = SplitConformalCalibrator()
-    flow_conformal.fit(flow_scores[cal_idx])
-    flow_pvalues = flow_conformal.pvalues(flow_scores)
-    np.save(RESULTS_DIR / "flow_pvalues.npy", flow_pvalues)
-
     # Step 5b: Stability runs
     logger.info("=== Step 5b: Multi-seed stability runs ===")
     def if_train_fn(spectra, seed):
@@ -240,80 +231,6 @@ def run(
     categories = categorize_anomalies(spectra, pca_errors)
     np.save(RESULTS_DIR / "categories.npy", np.array(categories))
 
-    # Step 6b: PBH Feature Extraction
-    if not skip_pbh:
-        from src.features.microlensing import microlensing_score
-        from src.features.accretion import accretion_score
-        from src.features.line_asymmetry import line_asymmetry_score
-        from src.features.multiepoch import multiepoch_variability_scores, assign_multiepoch_scores
-        from src.features.gaia_crossmatch import query_gaia_for_candidates, score_astrometric_anomalies
-        from src.features.photometric_crossmatch import query_sdss_photometry, score_color_anomalies
-
-        logger.info("=== Step 6b: PBH Feature Extraction ===")
-        meta_df_pbh = pd.read_parquet(PROCESSED_DIR / "spectra_metadata.parquet")
-        ml_scores = microlensing_score(spectra, DEFAULT_GRID, meta_df_pbh)
-        acc_scores = accretion_score(spectra, DEFAULT_GRID, meta_df_pbh)
-        np.save(RESULTS_DIR / "microlensing_scores.npy", ml_scores)
-        np.save(RESULTS_DIR / "accretion_scores.npy", acc_scores)
-
-        asym_scores = line_asymmetry_score(spectra, DEFAULT_GRID, meta_df_pbh)
-        np.save(RESULTS_DIR / "line_asymmetry_scores.npy", asym_scores)
-
-        pbh_categories = categorize_pbh_candidates(ml_scores, acc_scores)
-        np.save(RESULTS_DIR / "pbh_categories.npy", np.array(pbh_categories))
-        logger.info(
-            "PBH candidates: %d microlensing, %d accretion, %d both",
-            sum(1 for c in pbh_categories if c == "microlensing_candidate"),
-            sum(1 for c in pbh_categories if c == "accretion_candidate"),
-            sum(1 for c in pbh_categories if c == "both_candidate"),
-        )
-
-        # Step 6c: Multi-epoch variability search
-        logger.info("=== Step 6c: Multi-epoch variability search ===")
-        variability_df = multiepoch_variability_scores(spectra, meta_df_pbh, DEFAULT_GRID)
-        variability_df.to_parquet(RESULTS_DIR / "multiepoch_variability.parquet")
-        multiepoch_scores = assign_multiepoch_scores(variability_df, len(spectra))
-        np.save(RESULTS_DIR / "multiepoch_scores.npy", multiepoch_scores)
-        logger.info(
-            "Multi-epoch: %d groups found, %d spectra with repeat observations",
-            len(variability_df),
-            int((multiepoch_scores > 0).sum()),
-        )
-
-        # Step 6d: Gaia DR3 cross-match (PBH candidates only)
-        logger.info("=== Step 6d: Gaia DR3 cross-match ===")
-        pbh_candidate_idx = np.where(np.array(pbh_categories) != "none")[0]
-        if len(pbh_candidate_idx) > 0:
-            gaia_df = query_gaia_for_candidates(meta_df_pbh, candidate_indices=pbh_candidate_idx)
-            gaia_scored = score_astrometric_anomalies(gaia_df)
-            gaia_scored.to_parquet(RESULTS_DIR / "gaia_crossmatch.parquet")
-            logger.info(
-                "Gaia cross-match: %d / %d candidates matched, %d with RUWE > 1.4",
-                len(gaia_scored),
-                len(pbh_candidate_idx),
-                int(gaia_scored["ruwe_flag"].sum()) if len(gaia_scored) > 0 else 0,
-            )
-        else:
-            logger.info("No PBH candidates to cross-match with Gaia")
-            score_astrometric_anomalies(pd.DataFrame()).to_parquet(
-                RESULTS_DIR / "gaia_crossmatch.parquet"
-            )
-
-        # Step 6e: SDSS photometric cross-match
-        logger.info("=== Step 6e: SDSS photometric cross-match ===")
-        phot_df = query_sdss_photometry(meta_df_pbh, candidate_indices=pbh_candidate_idx)
-        phot_scored = score_color_anomalies(phot_df, meta_df_pbh)
-        phot_scored.to_parquet(RESULTS_DIR / "photometric_crossmatch.parquet")
-        if len(phot_scored) > 0:
-            logger.info(
-                "Photometry: %d / %d candidates matched, %d with blue excess",
-                len(phot_scored),
-                len(pbh_candidate_idx),
-                int(phot_scored["blue_excess_flag"].sum()),
-            )
-        else:
-            logger.info("No photometric matches found (SDSS may be unreachable)")
-
     # Parameter counts
     param_counts = {
         "classical_if": classical.param_count(),
@@ -321,24 +238,16 @@ def run(
         "ocsvm": ocsvm.param_count(),
         "dagmm": dagmm_model.param_count(),
         "conditional_ae": cond_ae_model.param_count(),
-        "cvae": cvae_model.param_count(),
-        "conditional_flow": flow_model.param_count(),
     }
     with open(RESULTS_DIR / "param_counts.json", "w") as f:
         json.dump(param_counts, f, indent=2)
 
     # Step 7: Compare all models
     logger.info("=== Step 7: Comparing all models ===")
-    all_scores = {"if": if_scores, "ae": ae_scores, "ocsvm": ocsvm_scores, "dagmm": dagmm_scores, "cond_ae": cond_ae_scores, "cvae": cvae_scores, "flow": flow_scores}
+    all_scores = {"if": if_scores, "ae": ae_scores, "ocsvm": ocsvm_scores, "dagmm": dagmm_scores, "cond_ae": cond_ae_scores}
     comparison_top_n = adaptive_top_n(len(spectra))
     comparison = compare_n_models(all_scores, top_n=comparison_top_n)
     comparison_with_meta = pd.concat([comparison, pd.DataFrame(meta_list)], axis=1)
-    # Add PBH scores as extra columns (not part of rank aggregation)
-    if not skip_pbh:
-        comparison_with_meta["microlensing_score"] = ml_scores
-        comparison_with_meta["accretion_score"] = acc_scores
-        comparison_with_meta["line_asymmetry_score"] = asym_scores
-        comparison_with_meta["pbh_category"] = pbh_categories
     comparison_with_meta.to_parquet(RESULTS_DIR / "comparison.parquet")
     with open(RESULTS_DIR / "comparison_config.json", "w") as f:
         json.dump({
@@ -361,40 +270,24 @@ def run(
     focused_review["agreement_fraction"] = focused_review["n_models_agreed"] / len(all_scores)
     focused_review.to_parquet(RESULTS_DIR / "focused_review.parquet")
 
-    labels_path = RESULTS_DIR / "review_labels.parquet"
-    if labels_path.exists():
-        labels_df = pd.read_parquet(labels_path)
-        for col in labels_df.columns:
-            if col != "filename" and col in focused_review.columns:
-                focused_review = focused_review.drop(columns=[col])
-        focused_review = focused_review.merge(labels_df, on="filename", how="left")
-        focused_review.to_parquet(RESULTS_DIR / "focused_review.parquet")
-
-    # Step 8: Semi-synthetic evaluation
-    logger.info("=== Step 8: Semi-synthetic evaluation ===")
-    modified_spectra, injection_labels, injection_log = inject_anomalies(
-        spectra, DEFAULT_GRID, fraction=0.1, seed=42,
-    )
-
-    scoring_dict = {
-        "if": classical.score(modified_spectra),
-        "ae": model.reconstruction_error(modified_spectra.astype(np.float32)),
-        "ocsvm": ocsvm.score(modified_spectra),
-        "dagmm": dagmm_model.anomaly_score(modified_spectra.astype(np.float32)),
-        "cond_ae": cond_ae_model.reconstruction_error(modified_spectra.astype(np.float32), meta_features),
-        "cvae": cvae_model.anomaly_score(modified_spectra.astype(np.float32), meta_features),
-        "flow": flow_model.anomaly_score(classical.transform(modified_spectra), meta_features),
-    }
-
-    retrieval_results = {}
-    for detector_name, detector_scores in scoring_dict.items():
-        retrieval_results[detector_name] = evaluate_retrieval(
-            injection_labels, detector_scores, injection_log,
-            top_k_list=[10, 25, 50, min(100, len(spectra))],
+    # Step 9: Keep top anomaly FITS for dashboard inspection
+    if keep_top_n > 0:
+        logger.info("=== Step 9: Keeping top %d anomaly FITS ===", keep_top_n)
+        import shutil
+        kept_dir = PROJECT_ROOT / "data" / "raw_kept"
+        kept_dir.mkdir(parents=True, exist_ok=True)
+        top_filenames = (
+            comparison_with_meta
+            .sort_values("combined_rank")
+            .head(keep_top_n)["filename"]
+            .tolist()
         )
-
-    with open(RESULTS_DIR / "evaluation_results.json", "w") as f:
-        json.dump(retrieval_results, f, indent=2, default=float)
+        for fn in top_filenames:
+            src = RAW_DIR / fn
+            dst = kept_dir / fn
+            if src.exists() and not dst.exists():
+                shutil.copy2(src, dst)
+        logger.info("Kept %d FITS files in %s", len(list(kept_dir.glob("*.fits"))), kept_dir)
 
     logger.info(
         "Pipeline complete. %s anomalies agreed by 3+ models within top-%s per-model ranks.",
@@ -442,11 +335,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="auto",
         help="Transport for FITS downloads: auto, rsync, https, or astroquery.",
     )
-    parser.add_argument(
-        "--skip-pbh",
-        action="store_true",
-        help="Skip PBH feature extraction (microlensing and accretion scoring).",
-    )
+    parser.add_argument("--streaming", action="store_true",
+                        help="Force streaming download mode (auto-enabled for n-spectra > 1000).")
+    parser.add_argument("--batch-size", type=int, default=500,
+                        help="FITS download batch size for streaming mode.")
+    parser.add_argument("--download-workers", type=int, default=8,
+                        help="Parallel download workers for streaming mode.")
+    parser.add_argument("--keep-top-n", type=int, default=200,
+                        help="Number of top anomaly FITS to keep for dashboard inspection.")
     return parser
 
 
@@ -461,7 +357,10 @@ def main() -> None:
         download_timeout=args.download_timeout,
         max_retries=args.max_retries,
         download_transport=args.download_transport,
-        skip_pbh=args.skip_pbh,
+        streaming=args.streaming,
+        batch_size=args.batch_size,
+        download_workers=args.download_workers,
+        keep_top_n=args.keep_top_n,
     )
 
 
