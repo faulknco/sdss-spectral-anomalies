@@ -172,6 +172,21 @@ def load_or_fetch_processed_spectrum(
     )
 
 
+def create_memmap(path: Path, total_rows: int, n_cols: int) -> None:
+    """Create a zeroed float32 .npy file suitable for memory-mapped writes."""
+    arr = np.zeros((total_rows, n_cols), dtype=np.float32)
+    np.save(path, arr)
+
+
+def write_to_memmap(
+    path: Path, data: np.ndarray, offset: int, total_rows: int, n_cols: int
+) -> None:
+    """Write *data* into an existing .npy file at the given row offset."""
+    mm = np.load(path, mmap_mode="r+")
+    mm[offset : offset + data.shape[0]] = data
+    del mm
+
+
 METADATA_FEATURE_COLS = ["elodie_teff", "elodie_logg", "elodie_feh", "sn_median"]
 
 

@@ -1,7 +1,9 @@
 """Download stellar spectra from SDSS via astroquery."""
+import json
 import logging
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from time import sleep
 from typing import Any
@@ -383,3 +385,199 @@ def download_spectra(
 
     logger.info(f"Downloaded {len(downloaded)} spectra to {output_dir}")
     return downloaded
+
+
+def _fetch_and_preprocess_one(
+    row: dict,
+    raw_tmp_dir: Path,
+    target_grid: np.ndarray,
+    timeout: int = DEFAULT_DOWNLOAD_TIMEOUT,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    transport: str = "auto",
+) -> tuple[dict | None, np.ndarray | None]:
+    """Download one FITS, preprocess it, return (metadata_dict, flux_array) or (None, None)."""
+    from src.data.preprocess import resample_spectrum, normalize_spectrum, _make_metadata_dict
+
+    plate, mjd, fiberid = int(row["plate"]), int(row["mjd"]), int(row["fiberid"])
+    run2d = row.get("run2d")
+
+    path, status, attempts, error = _download_spectrum_file(
+        plate=plate, mjd=mjd, fiberid=fiberid,
+        output_dir=raw_tmp_dir,
+        run2d=run2d, timeout=timeout, max_retries=max_retries,
+        retry_delay=DEFAULT_RETRY_DELAY,
+        cache=False, show_progress=False, transport=transport,
+    )
+    if status == "failed" or path is None:
+        return None, None
+
+    try:
+        from astropy.io import fits as astro_fits
+        with astro_fits.open(path) as hdul:
+            parsed = parse_spectrum_fits(hdul["COADD"].data)
+            flux = normalize_spectrum(resample_spectrum(
+                parsed["wavelength"], parsed["flux"], target_grid
+            ))
+
+            if "SPECOBJ" in hdul:
+                meta_ext = hdul["SPECOBJ"].data
+            elif "SPALL" in hdul:
+                meta_ext = hdul["SPALL"].data
+            else:
+                meta_ext = None
+
+            def _sf(arr, name, fallback=np.nan):
+                return float(arr[name][0]) if arr is not None and name in arr.dtype.names else fallback
+
+            meta = _make_metadata_dict(
+                filename=build_sdss_filename(plate, mjd, fiberid),
+                plate=plate, mjd=mjd, fiberid=fiberid,
+                ra=_sf(meta_ext, "RA", _sf(meta_ext, "PLUG_RA", np.nan)),
+                dec=_sf(meta_ext, "DEC", _sf(meta_ext, "PLUG_DEC", np.nan)),
+                subclass=str(meta_ext["SUBCLASS"][0]).strip() if meta_ext is not None else "",
+                sn_median=_sf(meta_ext, "SN_MEDIAN_ALL", 0.0),
+                teff=_sf(meta_ext, "ELODIE_TEFF"),
+                logg=_sf(meta_ext, "ELODIE_LOGG"),
+                feh=_sf(meta_ext, "ELODIE_FEH"),
+            )
+        path.unlink(missing_ok=True)
+        return meta, flux
+    except Exception as e:
+        logger.warning("Failed to process %s: %s", build_sdss_filename(plate, mjd, fiberid), e)
+        if path is not None and path.exists():
+            path.unlink(missing_ok=True)
+        return None, None
+
+
+def stream_and_preprocess(
+    metadata_df: pd.DataFrame,
+    processed_dir: Path,
+    raw_tmp_dir: Path | None = None,
+    batch_size: int = 500,
+    n_workers: int = 8,
+    target_grid: np.ndarray | None = None,
+    timeout: int = DEFAULT_DOWNLOAD_TIMEOUT,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    transport: str = "auto",
+) -> int:
+    """Stream-and-discard: download FITS in parallel batches, preprocess, delete."""
+    from src.data.preprocess import DEFAULT_GRID, create_memmap, write_to_memmap
+
+    if target_grid is None:
+        target_grid = DEFAULT_GRID
+    if raw_tmp_dir is None:
+        raw_tmp_dir = processed_dir.parent / "raw_tmp"
+
+    raw_tmp_dir.mkdir(parents=True, exist_ok=True)
+    processed_dir.mkdir(parents=True, exist_ok=True)
+
+    n_total = len(metadata_df)
+    grid_size = len(target_grid)
+    memmap_path = processed_dir / "spectra.npy"
+    checkpoint_path = processed_dir / "streaming_checkpoint.json"
+
+    start_batch = 0
+    offset = 0
+    total_success = 0
+    total_fail = 0
+    all_metadata: list[dict] = []
+
+    if checkpoint_path.exists():
+        with open(checkpoint_path) as f:
+            ckpt = json.load(f)
+        start_batch = ckpt["batch_index"] + 1
+        offset = ckpt["offset"]
+        total_success = ckpt["n_success"]
+        total_fail = ckpt["n_fail"]
+        meta_path = processed_dir / "spectra_metadata_partial.parquet"
+        if meta_path.exists():
+            all_metadata = pd.read_parquet(meta_path).to_dict("records")
+        logger.info("Resuming from batch %d (offset=%d, success=%d, fail=%d)",
+                     start_batch, offset, total_success, total_fail)
+
+    if start_batch == 0:
+        create_memmap(memmap_path, total_rows=n_total, n_cols=grid_size)
+
+    batches = [
+        metadata_df.iloc[i : i + batch_size]
+        for i in range(0, n_total, batch_size)
+    ]
+
+    for batch_idx in range(start_batch, len(batches)):
+        batch = batches[batch_idx]
+        batch_rows = batch.to_dict("records")
+        batch_success: list[tuple[dict, np.ndarray]] = []
+        batch_fail = 0
+
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            futures = {
+                executor.submit(
+                    _fetch_and_preprocess_one, row, raw_tmp_dir, target_grid,
+                    timeout, max_retries, transport,
+                ): row
+                for row in batch_rows
+            }
+            for future in as_completed(futures):
+                meta, flux = future.result()
+                if meta is not None and flux is not None:
+                    batch_success.append((meta, flux))
+                else:
+                    batch_fail += 1
+
+        if batch_success:
+            fluxes_arr = np.array([flux for _, flux in batch_success], dtype=np.float32)
+            write_to_memmap(memmap_path, fluxes_arr, offset=offset, total_rows=n_total, n_cols=grid_size)
+            all_metadata.extend([meta for meta, _ in batch_success])
+            offset += len(batch_success)
+
+        total_success += len(batch_success)
+        total_fail += batch_fail
+
+        for f in raw_tmp_dir.glob("*.fits"):
+            f.unlink(missing_ok=True)
+
+        with open(checkpoint_path, "w") as f:
+            json.dump({
+                "batch_index": batch_idx,
+                "offset": offset,
+                "n_success": total_success,
+                "n_fail": total_fail,
+            }, f)
+
+        pd.DataFrame(all_metadata).to_parquet(
+            processed_dir / "spectra_metadata_partial.parquet", index=False
+        )
+
+        batch_fail_rate = batch_fail / max(len(batch_rows), 1)
+        if batch_fail_rate > 0.1:
+            logger.warning("Batch %d had %.0f%% failure rate", batch_idx, batch_fail_rate * 100)
+
+        total_fail_rate = total_fail / max(total_success + total_fail, 1)
+        if total_fail_rate > 0.2:
+            raise RuntimeError(
+                f"Aborting: {total_fail_rate:.0%} total download failure rate "
+                f"({total_fail} failures out of {total_success + total_fail})"
+            )
+
+        logger.info("Batch %d/%d: %d success, %d fail (total: %d/%d)",
+                     batch_idx + 1, len(batches), len(batch_success), batch_fail,
+                     total_success, n_total)
+
+    if total_success < n_total:
+        full = np.load(memmap_path, mmap_mode="r")
+        compacted = np.array(full[:total_success])
+        del full
+        np.save(memmap_path, compacted)
+
+    pd.DataFrame(all_metadata).to_parquet(
+        processed_dir / "spectra_metadata.parquet", index=False
+    )
+
+    partial_meta = processed_dir / "spectra_metadata_partial.parquet"
+    if partial_meta.exists():
+        partial_meta.unlink()
+    if checkpoint_path.exists():
+        checkpoint_path.unlink()
+
+    logger.info("Streaming complete: %d spectra processed (%d failed)", total_success, total_fail)
+    return total_success

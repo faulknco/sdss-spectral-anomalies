@@ -170,3 +170,93 @@ def test_download_spectra_uses_rsync_transport(tmp_path):
     mock_run_cmd.assert_called_once()
     manifest = pd.read_parquet(tmp_path / MANIFEST_NAME)
     assert manifest.loc[0, "status"] == "downloaded"
+
+
+from unittest.mock import patch
+from src.data.download import stream_and_preprocess
+
+
+def test_stream_and_preprocess_basic(tmp_path):
+    processed_dir = tmp_path / "processed"
+    processed_dir.mkdir()
+    raw_tmp = tmp_path / "raw_tmp"
+
+    metadata = pd.DataFrame({
+        "plate": [1, 2, 3],
+        "mjd": [50000, 50000, 50000],
+        "fiberid": [1, 2, 3],
+        "run2d": ["v5_13_2", "v5_13_2", "v5_13_2"],
+    })
+
+    def mock_download(plate, mjd, fiberid, output_dir, **kwargs):
+        from astropy.io import fits as astro_fits
+        fname = f"spec-{plate:04d}-{mjd}-{fiberid:04d}.fits"
+        path = output_dir / fname
+        output_dir.mkdir(parents=True, exist_ok=True)
+        n_pix = 100
+        col1 = astro_fits.Column(name="loglam", format="D", array=np.linspace(3.58, 3.96, n_pix))
+        col2 = astro_fits.Column(name="flux", format="D", array=np.ones(n_pix))
+        coadd = astro_fits.BinTableHDU.from_columns([col1, col2], name="COADD")
+        col_ra = astro_fits.Column(name="RA", format="D", array=[180.0])
+        col_dec = astro_fits.Column(name="DEC", format="D", array=[45.0])
+        col_sub = astro_fits.Column(name="SUBCLASS", format="10A", array=["G5"])
+        col_sn = astro_fits.Column(name="SN_MEDIAN_ALL", format="D", array=[25.0])
+        col_teff = astro_fits.Column(name="ELODIE_TEFF", format="D", array=[5500.0])
+        col_logg = astro_fits.Column(name="ELODIE_LOGG", format="D", array=[4.4])
+        col_feh = astro_fits.Column(name="ELODIE_FEH", format="D", array=[-0.1])
+        specobj = astro_fits.BinTableHDU.from_columns(
+            [col_ra, col_dec, col_sub, col_sn, col_teff, col_logg, col_feh], name="SPECOBJ"
+        )
+        hdul = astro_fits.HDUList([astro_fits.PrimaryHDU(), coadd, specobj])
+        hdul.writeto(path, overwrite=True)
+        return path, "ok", 1, None
+
+    target_grid = np.linspace(3800, 9200, 200)
+    with patch("src.data.download._download_spectrum_file", side_effect=mock_download):
+        n_success = stream_and_preprocess(
+            metadata, processed_dir, raw_tmp_dir=raw_tmp,
+            batch_size=2, n_workers=1, target_grid=target_grid,
+        )
+
+    assert n_success == 3
+    spectra = np.load(processed_dir / "spectra.npy", mmap_mode="r")
+    assert spectra.shape == (3, 200)
+    assert spectra.dtype == np.float32
+    meta_df = pd.read_parquet(processed_dir / "spectra_metadata.parquet")
+    assert len(meta_df) == 3
+
+
+def test_stream_and_preprocess_cleans_temp_files(tmp_path):
+    processed_dir = tmp_path / "processed"
+    processed_dir.mkdir()
+    raw_tmp = tmp_path / "raw_tmp"
+
+    metadata = pd.DataFrame({
+        "plate": [1], "mjd": [50000], "fiberid": [1], "run2d": ["v5_13_2"],
+    })
+
+    def mock_download(plate, mjd, fiberid, output_dir, **kwargs):
+        from astropy.io import fits as astro_fits
+        fname = f"spec-{plate:04d}-{mjd}-{fiberid:04d}.fits"
+        path = output_dir / fname
+        output_dir.mkdir(parents=True, exist_ok=True)
+        col1 = astro_fits.Column(name="loglam", format="D", array=np.linspace(3.58, 3.96, 50))
+        col2 = astro_fits.Column(name="flux", format="D", array=np.ones(50))
+        coadd = astro_fits.BinTableHDU.from_columns([col1, col2], name="COADD")
+        col_ra = astro_fits.Column(name="RA", format="D", array=[180.0])
+        col_dec = astro_fits.Column(name="DEC", format="D", array=[45.0])
+        col_sub = astro_fits.Column(name="SUBCLASS", format="10A", array=["G5"])
+        specobj = astro_fits.BinTableHDU.from_columns([col_ra, col_dec, col_sub], name="SPECOBJ")
+        hdul = astro_fits.HDUList([astro_fits.PrimaryHDU(), coadd, specobj])
+        hdul.writeto(path, overwrite=True)
+        return path, "ok", 1, None
+
+    target_grid = np.linspace(3800, 9200, 100)
+    with patch("src.data.download._download_spectrum_file", side_effect=mock_download):
+        stream_and_preprocess(
+            metadata, processed_dir, raw_tmp_dir=raw_tmp,
+            batch_size=1, n_workers=1, target_grid=target_grid,
+        )
+
+    if raw_tmp.exists():
+        assert len(list(raw_tmp.glob("*.fits"))) == 0
