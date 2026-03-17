@@ -51,7 +51,7 @@ Shared constant, also used by dashboard annotations:
 
 ### Integration
 
-The pipeline computes and saves `derivative_spectra.npy` and `line_features.npy` in `data/processed/`. The semi-synthetic assessment uses line windows to verify injected anomalies are detectable in the right spectral regions. The dashboard's hardcoded `SPECTRAL_LINES` list is replaced with an import from the shared catalog.
+The pipeline computes and saves `derivative_spectra.npy` and `line_features.npy` in `data/processed/`. The semi-synthetic assessment uses line windows to verify injected anomalies are detectable in the right spectral regions. The dashboard's hardcoded `SPECTRAL_LINES` list is replaced with an import from the shared catalog. The catalog exports both the full 11-line list and a `DISPLAY_LINES` subset (the original 6: Ca K, Ca H, H-gamma, H-beta, Na D, H-alpha) for annotation overlays where visual clarity matters. The full 11-line list is used for feature extraction and injection targeting.
 
 ## 2. Conditional VAE (CVAE)
 
@@ -63,17 +63,20 @@ Extends the conditional AE pattern with a variational bottleneck. The encoder ou
 
 ```
 flux (B, 1, L) -> conv_encoder -> (B, 128)
-meta (B, 4)    -> meta_mlp     -> (B, meta_embed_dim)
+meta (B, meta_dim) -> meta_mlp -> (B, meta_embed_dim)
 concat -> fc_mu, fc_logvar -> sample z (B, bottleneck_dim)
 
 z concat meta_emb -> decoder_fc -> deconv -> recon (B, 1, L)
 ```
+
+The constructor accepts a dynamic `meta_dim` parameter (defaulting to `len(METADATA_FEATURE_COLS)` = 4), following the same pattern as `ConditionalSpectralAutoencoder`. The pipeline passes `metadata.shape[1]` at construction time.
 
 ### Key Differences from Conditional AE
 
 - Encoder produces `mu` and `log_var` instead of a deterministic bottleneck.
 - Loss: MSE + beta * KL. Beta warms up linearly from 0 over the first 10 epochs to avoid posterior collapse.
 - Anomaly score: negative ELBO per spectrum = `reconstruction_error + KL_divergence`. Higher means the spectrum is less likely given its stellar parameters.
+- Method is named `anomaly_score()` (not `reconstruction_error()`) because the ELBO includes the KL term, not just reconstruction MSE. The CVAE does not expose a `reconstruction_error()` method to avoid confusion.
 
 ### Scoring Interface
 
@@ -81,7 +84,7 @@ z concat meta_emb -> decoder_fc -> deconv -> recon (B, 1, L)
 
 ### Training
 
-Same train/calibration split as the conditional AE (80/20 random, seed 42). Reuses `build_metadata_features` for metadata standardization. Conformal p-values computed on calibration set scores.
+Same train/calibration split as the conditional AE (80/20 random, seed 42). Reuses `build_metadata_features` for metadata standardization. Conformal p-values computed on calibration set scores. Fixed 50 epochs (no early stopping) to match the conditional AE. The beta warmup over the first 10 epochs provides implicit regularization against posterior collapse.
 
 ## 3. Conditional Normalizing Flow
 
@@ -108,7 +111,10 @@ score = -log p(z_pca | context)
 
 ### Scoring Interface
 
-`model.log_prob(pca_components, metadata) -> np.ndarray`. Anomaly score is `-log_prob` (higher = more anomalous). Same interface for `compare_n_models` and conformal calibration.
+Two methods:
+
+- `model.log_prob(pca_components, metadata) -> np.ndarray` -- returns log-likelihood per spectrum.
+- `model.anomaly_score(pca_components, metadata) -> np.ndarray` -- returns `-log_prob` (higher = more anomalous). This is the method used by `compare_n_models` and conformal calibration, keeping the convention consistent with all other models in the codebase.
 
 ### Training
 
@@ -174,12 +180,16 @@ Runs against any model's scores, giving a standardized comparison.
 
 ### Pipeline (`src/run_pipeline.py`)
 
-New steps after the existing conditional AE block:
+New steps inserted into the existing pipeline. The ordering is:
 
-- **Step 5d:** Compute derivative spectra and line features. Save to `data/processed/`.
+- Steps 1-4b: unchanged (download, preprocess, classical, OC-SVM, AE, DAGMM)
+- Step 5: conditional AE + conformal (unchanged)
+- **Step 5d:** Compute derivative spectra and line features. Save to `data/processed/`. (Inserted after Step 5c, before stability runs.)
 - **Step 5e:** Train CVAE, score, conformal calibrate. Save `cvae_scores.npy`, `cvae_pvalues.npy`, `cvae_losses.npy`.
-- **Step 5f:** Train conditional flow on PCA components. Save `flow_scores.npy`, `flow_pvalues.npy`.
-- **Step 8:** Semi-synthetic assessment. Inject anomalies, score with all 7 models, save `evaluation_results.json`.
+- **Step 5f:** Train conditional flow on PCA components (from Step 3). Save `flow_scores.npy`, `flow_pvalues.npy`, `flow_losses.npy`.
+- Step 5b: stability runs (unchanged, stays after all model training)
+- Steps 6-7: categorization and comparison (unchanged, but comparison now includes 7 models)
+- **Step 8:** Semi-synthetic assessment. Inject anomalies into clean spectra, re-project through the already-fitted classical PCA (via `classical.transform(modified_spectra)`) for the flow model, then score with all 7 models. Save `evaluation_results.json`.
 
 Updated model roster for `compare_n_models`:
 
@@ -198,6 +208,12 @@ all_scores = {
 - Model Comparison scatter matrix grows to 7 models.
 - Sidebar param counts include CVAE and flow.
 - **New Tab 7: "Evaluation"** -- Retrieval metrics from `evaluation_results.json`: bar charts of precision_at_k and recall_at_k by model, per-anomaly-type recall heatmap, AUROC/AUPRC comparison table. Only visible when `evaluation_results.json` exists.
+
+### Notes
+
+- **Combined sort:** The Anomaly Browser's "Combined" sort currently sums raw scores without normalization. With 7 models, this is increasingly dominated by whichever model has the largest raw score magnitude. This is a pre-existing issue; we leave it as-is for now but may revisit with rank-based combination later.
+- **GPU:** All models are designed to train on CPU (consistent with the existing pipeline). The MAF with 8 MADE blocks on 50-dim PCA input is modest and does not require GPU for reasonable training times.
+- **Adaptive top-k:** `evaluate_retrieval`'s `top_k_list` default of `[10, 25, 50, 100]` should be treated as a default. The pipeline integration should use `adaptive_top_n` or similar scaling when the dataset size changes significantly.
 
 ### What Doesn't Change
 
@@ -240,4 +256,5 @@ all_scores = {
 | `cvae_losses.npy` | `data/results/` |
 | `flow_scores.npy` | `data/results/` |
 | `flow_pvalues.npy` | `data/results/` |
+| `flow_losses.npy` | `data/results/` |
 | `evaluation_results.json` | `data/results/` |
