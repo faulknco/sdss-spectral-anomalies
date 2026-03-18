@@ -89,21 +89,28 @@ def run(
         meta_list = pd.read_parquet(PROCESSED_DIR / "spectra_metadata.parquet").to_dict("records")
         n_components = _effective_n_components(spectra, requested=50)
     elif download_mode == "skip":
-        # Step 1: Download
-        logger.info("=== Step 1: Skipping remote metadata/download; using local FITS only ===")
+        logger.info("=== Step 1: Skipping remote metadata/download ===")
         metadata_path = PROCESSED_DIR / "metadata.parquet"
         if metadata_path.exists():
             metadata_df = pd.read_parquet(metadata_path)
         else:
             metadata_df = pd.DataFrame()
 
-        # Step 2: Preprocess
-        logger.info("=== Step 2: Preprocessing spectra ===")
-        spectra, meta_list = load_and_preprocess(RAW_DIR, DEFAULT_GRID)
-        if len(spectra) == 0:
-            raise RuntimeError("No local FITS spectra available to preprocess")
-        np.save(PROCESSED_DIR / "spectra.npy", spectra)
-        pd.DataFrame(meta_list).to_parquet(PROCESSED_DIR / "spectra_metadata.parquet")
+        # Check for existing processed spectra (from a previous streaming run)
+        spectra_path = PROCESSED_DIR / "spectra.npy"
+        meta_parquet_path = PROCESSED_DIR / "spectra_metadata.parquet"
+        if spectra_path.exists() and meta_parquet_path.exists():
+            logger.info("=== Step 2: Loading existing processed spectra ===")
+            spectra = np.array(np.load(spectra_path))
+            meta_list = pd.read_parquet(meta_parquet_path).to_dict("records")
+            logger.info("Loaded %d spectra from %s", len(spectra), spectra_path)
+        else:
+            logger.info("=== Step 2: Preprocessing spectra from local FITS ===")
+            spectra, meta_list = load_and_preprocess(RAW_DIR, DEFAULT_GRID)
+            if len(spectra) == 0:
+                raise RuntimeError("No local FITS spectra available to preprocess")
+            np.save(spectra_path, spectra)
+            pd.DataFrame(meta_list).to_parquet(meta_parquet_path)
         n_components = _effective_n_components(spectra, requested=50)
     else:
         # Step 1: Download
