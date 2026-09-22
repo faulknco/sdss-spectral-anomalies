@@ -9,3 +9,11 @@ dist/
 .firecrawl/
 data/raw_tmp/
 data/raw_kept/
+
+# Environment / secrets
+.env
+.env.*
+
+# Local run logs and Claude Code local settings
+*.log
+.claude/
